@@ -67,6 +67,13 @@ jobs:
             dbus-run-session -- xvfb-run -a cargo test --workspace $features
           done
 
+      # Packages all three crates and builds each against the others as
+      # crates.io would serve them, so a change that would break publishing
+      # shows up here rather than on release day.
+      - name: Publish dry run
+        if: matrix.toolchain == 'stable'
+        run: cargo publish --workspace --dry-run
+
       - name: Keep the pictures a failing render test drew
         if: failure()
         uses: actions/upload-artifact@v4

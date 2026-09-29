@@ -1,11 +1,14 @@
 [package]
-rust-version.workspace = true
 name = "rotulus-layout"
-version = "0.1.0"
-edition = "2021"
-license = "LGPL-2.1-or-later"
+rust-version.workspace = true
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "The layout engine behind the Rotulus chat view: message model, wrapping, height index, scroll anchoring"
-publish = false
+readme = "README.md"
+keywords = ["chat", "scrollback", "layout", "text"]
+categories = ["gui", "text-processing"]
 
 [lib]
 # rlib only: the widget crate links it, and so does anything that wants

@@ -1,11 +1,14 @@
 [package]
-rust-version.workspace = true
 name = "rotulus"
-version = "0.1.0"
-edition = "2021"
-license = "LGPL-2.1-or-later"
+rust-version.workspace = true
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "A GTK4 scrollback view for text-stream chat"
-publish = false
+readme = "../../README.md"
+keywords = ["gtk4", "chat", "scrollback", "widget", "irc"]
+categories = ["gui"]
 
 [lib]
 # rlib only. An application that links its Rust statically bundles this
@@ -30,16 +33,21 @@ v4_14 = ["gtk4/v4_14"]
 capi = ["gtk4/unsafe-assume-initialized"]
 
 [dependencies]
-rotulus-mirc = { path = "../rotulus-mirc", optional = true }
+rotulus-mirc = { workspace = true, optional = true }
 # The layout engine. All the interesting logic lives there and is tested
 # headless; this crate is the GTK skin over it.
-rotulus-layout = { path = "../rotulus-layout" }
+rotulus-layout = { workspace = true }
 glib = { workspace = true }
 gtk4 = { workspace = true, features = ["v4_10"] }
 # Pango directly, for the TextMeasure implementation and the shaped
 # layouts the snapshot pass hands to GSK.
 pango = "0.22"
 pangocairo = "0.22"
+
+# docs.rs builds without GTK installed, which the gtk-rs crates allow for;
+# the feature shows the accessibility interface in the docs.
+[package.metadata.docs.rs]
+features = ["v4_14"]
 
 [[test]]
 name = "render"

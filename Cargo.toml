@@ -7,8 +7,17 @@ members = ["crates/rotulus", "crates/rotulus-layout", "crates/rotulus-mirc"]
 # here turns on the MSRV-aware resolver, which keeps transitive
 # dependencies from jumping to versions that need a newer rustc.
 rust-version = "1.92"
+# The three crates release together, at one version.
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-2.1-or-later"
+repository = "https://github.com/mishan/rotulus"
 
 [workspace.dependencies]
+# A path for building here, and a version for crates.io, which drops the
+# path when it publishes. Keep the version in step with the one above.
+rotulus-layout = { path = "crates/rotulus-layout", version = "0.1.0" }
+rotulus-mirc = { path = "crates/rotulus-mirc", version = "0.1.0" }
 glib = "0.22"
 gtk4 = "0.11"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }

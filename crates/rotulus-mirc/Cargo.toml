@@ -1,11 +1,14 @@
 [package]
-rust-version.workspace = true
 name = "rotulus-mirc"
-version = "0.1.0"
-edition = "2021"
-license = "LGPL-2.1-or-later"
+rust-version.workspace = true
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Parse IRC (mIRC) formatting codes into Rotulus styled text"
-publish = false
+readme = "README.md"
+keywords = ["irc", "mirc", "formatting", "chat"]
+categories = ["parser-implementations", "text-processing"]
 
 [lib]
 crate-type = ["rlib"]
@@ -13,4 +16,4 @@ crate-type = ["rlib"]
 # Pure logic, like the layout engine it produces text for: no GTK, so it
 # is tested headless.
 [dependencies]
-rotulus-layout = { path = "../rotulus-layout" }
+rotulus-layout = { workspace = true }
