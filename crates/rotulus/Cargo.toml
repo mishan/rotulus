@@ -1,10 +1,10 @@
 [package]
 rust-version.workspace = true
-name = "hxchat-view"
+name = "rotulus"
 version = "0.1.0"
 edition = "2021"
-license = "GPL-2.0-or-later"
-description = "Chat-view phase C2: the GTK4 chat output widget over hxchat-layout"
+license = "LGPL-2.1-or-later"
+description = "A GTK4 scrollback view for text-stream chat"
 publish = false
 
 [lib]
@@ -14,10 +14,20 @@ publish = false
 # crates/gtkhx-ffi/src/lib.rs for the full rationale.
 crate-type = ["rlib"]
 
+[features]
+default = ["mirc"]
+# rotulus_mirc_parse, the C entry point to rotulus-mirc.
+mirc = ["dep:rotulus-mirc"]
+# GtkAccessibleText, so a screen reader can read the transcript. The
+# interface arrived in GTK 4.14; without the feature the view builds
+# against 4.10 and exposes only its role.
+v4_14 = ["gtk4/v4_14"]
+
 [dependencies]
+rotulus-mirc = { path = "../rotulus-mirc", optional = true }
 # The layout engine. All the interesting logic lives there and is tested
 # headless; this crate is the GTK skin over it.
-hxchat-layout = { path = "../hxchat-layout" }
+rotulus-layout = { path = "../rotulus-layout" }
 glib = { workspace = true }
 gtk4 = { workspace = true, features = ["v4_10"] }
 # Pango directly, for the TextMeasure implementation and the shaped

@@ -1,13 +1,13 @@
 //! The buffer: rows, marks, lazy layout, trim.
 //!
 //! Owns the message list, the [`HeightIndex`] that shadows it, and the
-//! [`ScrollAnchor`]. This is the object the view (C2) drives.
+//! [`ScrollAnchor`]. This is the object the view drives.
 //!
-//! The API mirrors what `chat_view.h` already exposes to C — append,
-//! insert-before-a-mark, remove-a-mark, clear, trim — so the C2 widget's
-//! FFI layer is a translation rather than a redesign. The difference is
-//! that a mark here is a [`MessageId`], not a pointer into a linked
-//! list, so a stale one is inert rather than dangling.
+//! The API mirrors what `rotulus.h` exposes to C — append,
+//! insert-before-a-mark, replace, remove-a-mark, clear, trim — so the
+//! widget's FFI layer is a translation rather than a redesign. A mark is
+//! a [`MessageId`], not a pointer into a linked list, so a stale one is
+//! inert rather than dangling.
 
 use crate::anchor::{AnchorResolver, Gravity, ScrollAnchor};
 use crate::index::HeightIndex;
@@ -36,7 +36,10 @@ pub const DEFAULT_GROUP_GAP_SECS: i64 = 300;
 struct Row {
     id: MessageId,
     msg: Message,
-    layout: Option<LayoutCache>,
+    /// Boxed, because only the rows that have been drawn have one: inline,
+    /// every row in the scrollback would reserve room for a layout it will
+    /// most likely never get.
+    layout: Option<Box<LayoutCache>>,
 }
 
 /// A scrollable list of laid-out messages.
@@ -160,7 +163,7 @@ impl ChatBuffer {
         self.max_rows
     }
 
-    /// Scrollback cap on live rows. Matches `hx_chat_view_set_max_lines`.
+    /// Scrollback cap on live rows. Matches `rotulus_view_set_max_lines`.
     pub fn set_max_rows(&mut self, n: usize, measure: &dyn TextMeasure) {
         self.max_rows = n;
         self.trim(measure);
@@ -218,6 +221,7 @@ impl ChatBuffer {
 
     /// Append a message; returns its mark.
     pub fn append(&mut self, mut msg: Message, measure: &dyn TextMeasure) -> MessageId {
+        msg.compact();
         let id = self.alloc_id();
         if self.groups_with_previous(&msg, self.rows.len()) {
             msg.flags = msg.flags.union(MessageFlags::GROUPED);
@@ -251,9 +255,10 @@ impl ChatBuffer {
     pub fn insert_before(
         &mut self,
         anchor: Option<MessageId>,
-        msg: Message,
+        mut msg: Message,
         measure: &dyn TextMeasure,
     ) -> MessageId {
+        msg.compact();
         let at = match anchor {
             Some(a) => self.locate(a).unwrap_or(0),
             None => 0,
@@ -320,7 +325,8 @@ impl ChatBuffer {
     }
 
     /// Replace a message in place, e.g. to attach a decoded image size.
-    pub fn replace(&mut self, id: MessageId, msg: Message, measure: &dyn TextMeasure) -> bool {
+    pub fn replace(&mut self, id: MessageId, mut msg: Message, measure: &dyn TextMeasure) -> bool {
+        msg.compact();
         self.reindex();
         let Some(row) = self.row_of(id) else {
             return false;
@@ -593,7 +599,7 @@ impl ChatBuffer {
         self.index.invalidate_all_measurements();
     }
 
-    /// Zoom, in per-mille (1000 = 100%). See scoping §3.7.
+    /// Zoom, in per-mille (1000 = 100%).
     pub fn set_zoom_permille(&mut self, zoom: u32) {
         if zoom == self.generation.zoom_permille {
             return;
@@ -712,13 +718,17 @@ impl ChatBuffer {
             params.indent_width = self.indent_width;
             let layout = layout_message(&self.rows[row].msg, &params, gen, measure);
             let height = layout.height;
-            self.rows[row].layout = Some(layout);
+            self.rows[row].layout = Some(Box::new(layout));
             self.index.set_height(row, height, true);
             return height;
         }
 
         let height = layout.height;
-        self.rows[row].layout = Some(layout);
+        // Reuse the allocation when the row is being relaid out.
+        match &mut self.rows[row].layout {
+            Some(b) => **b = layout,
+            slot => *slot = Some(Box::new(layout)),
+        }
         self.index.set_height(row, height, true);
         height
     }
@@ -859,13 +869,9 @@ impl ChatBuffer {
 
     /// The whitespace-delimited word around a caret.
     ///
-    /// Tokenised exactly like xtext's `is_del` macro (xtext.c:239):
-    /// space, newline, `<`, `>` and NUL. Matching it byte-for-byte is
-    /// the whole point — the existing C handlers in `chat.c` recognise
-    /// their targets by *string*, and the angle brackets are what let
-    /// `<nick>` split into a bare nick. Tokenise differently and
-    /// `inline_media_chat_word_click` stops finding `hxmedia:N`, and the
-    /// chat-history sentinel stops matching.
+    /// Tokenised like xtext's `is_del` macro: space, newline, `<`, `>`
+    /// and NUL. The angle brackets are what let `<nick>` split into a
+    /// bare nick when it is double-clicked.
     pub fn word_at(&self, caret: &Caret) -> Option<String> {
         let (start, end) = self.word_bounds(caret)?;
         let row = self.row_of(caret.message)?;
@@ -1001,7 +1007,7 @@ impl ChatBuffer {
     /// icon found nothing at all. Asking the layout directly keeps the
     /// clickable area and the painted area the same rectangle by
     /// construction.
-    pub fn avatar_at(&mut self, x: i32, y: u64) -> Option<(MessageId, u16)> {
+    pub fn avatar_at(&mut self, x: i32, y: u64) -> Option<(MessageId, u64)> {
         let hit = self.index.locate(y)?;
         let top = self.index.offset_of(hit.row);
         let row = self.rows.get(hit.row)?;
@@ -1010,12 +1016,12 @@ impl ChatBuffer {
         let local_y = y.checked_sub(top)? as i64;
         let (ax, ay, size) = (av.x as i64, av.y as i64, av.size as i64);
         if (x as i64) >= ax && (x as i64) < ax + size && local_y >= ay && local_y < ay + size {
-            // The id comes back with the uid because the caller needs
+            // The id comes back with the key because the caller needs
             // both and this has already found the row. Making it look
             // the row up again meant a second borrow of the buffer while
             // this one was still live — an instant RefCell panic on the
             // first avatar hover.
-            Some((id, av.uid))
+            Some((id, av.key))
         } else {
             None
         }
@@ -1408,7 +1414,7 @@ impl ChatBuffer {
     }
 
     pub fn layout_at(&self, row: usize) -> Option<&LayoutCache> {
-        self.rows.get(row).and_then(|r| r.layout.as_ref())
+        self.rows.get(row).and_then(|r| r.layout.as_deref())
     }
 
     pub fn total_height(&mut self) -> u64 {

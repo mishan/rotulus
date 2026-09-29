@@ -1,21 +1,21 @@
 //! Tests for the GTK skin, in two tiers.
 //!
 //! **Always-on:** the Pango measurer. `pangocairo`'s default font map
-//! works without a `GdkDisplay`, so the one part of C2 carrying real
+//! works without a `GdkDisplay`, so the one part of the widget carrying real
 //! logic rather than plumbing is testable anywhere. Geometry correctness
-//! proper is covered in `hxchat-layout` against a deterministic
+//! proper is covered in `rotulus-layout` against a deterministic
 //! measurer; what these check is that the *real* measurer upholds the
 //! invariants that engine assumes.
 //!
 //! **Display-gated:** one smoke test covering class registration and
 //! widget construction, at the bottom of this file. Those need a real
 //! GTK — gtk4-rs asserts an initialised GTK inside the generated
-//! `class_init` itself — which is precisely why every C2 bring-up crash
+//! `class_init` itself — which is precisely why every bring-up crash
 //! was invisible to `cargo test`. It no-ops without a display and runs
 //! on a desktop session.
 
 use crate::measure::PangoMeasure;
-use hxchat_layout::{Attrs, Style, TextMeasure};
+use rotulus_layout::{Attrs, Style, TextMeasure};
 
 fn m() -> PangoMeasure {
     PangoMeasure::headless("Monospace 10")
@@ -25,17 +25,17 @@ fn m() -> PangoMeasure {
 /// over its `colors[]` array and `ffi.rs` reads `PALETTE_COLS` entries
 /// from it. Nothing at the boundary checks the length, so a slot added on
 /// one side only would read past the end of the C array in silence. Read
-/// the C definitions out of `chat_view.h` and hold the Rust constants to
+/// the C definitions out of `rotulus.h` and hold the Rust constants to
 /// them.
 #[test]
-fn palette_constants_match_chat_view_h() {
-    let header = include_str!("../../../../src/chat_view.h");
+fn palette_constants_match_rotulus_h() {
+    let header = include_str!("../include/rotulus.h");
     let define = |name: &str| -> usize {
         let prefix = format!("#define {name} ");
         let line = header
             .lines()
             .find(|l| l.starts_with(&prefix))
-            .unwrap_or_else(|| panic!("chat_view.h no longer defines {name}"));
+            .unwrap_or_else(|| panic!("rotulus.h no longer defines {name}"));
         line[prefix.len()..]
             .split_whitespace()
             .next()
@@ -43,23 +43,116 @@ fn palette_constants_match_chat_view_h() {
             .unwrap_or_else(|| panic!("{name} is not a plain number: {line:?}"))
     };
     for (name, rust) in [
-        ("HX_CHAT_PAL_COLS", crate::view::PALETTE_COLS),
-        ("HX_CHAT_PAL_FG", crate::view::PAL_FG),
-        ("HX_CHAT_PAL_BG", crate::view::PAL_BG),
-        ("HX_CHAT_PAL_MARK_FG", crate::view::PAL_MARK_FG),
-        ("HX_CHAT_PAL_MARK_BG", crate::view::PAL_MARK_BG),
-        ("HX_CHAT_PAL_HISTORY_MUTED", crate::view::PAL_HISTORY_MUTED),
-        ("HX_CHAT_PAL_TIMESTAMP", crate::view::PAL_TIMESTAMP),
-        ("HX_CHAT_PAL_RULE", crate::view::PAL_RULE),
+        ("ROTULUS_PAL_COLS", crate::view::PALETTE_COLS),
+        ("ROTULUS_PAL_FG", crate::view::PAL_FG),
+        ("ROTULUS_PAL_BG", crate::view::PAL_BG),
+        ("ROTULUS_PAL_MARK_FG", crate::view::PAL_MARK_FG),
+        ("ROTULUS_PAL_MARK_BG", crate::view::PAL_MARK_BG),
+        ("ROTULUS_PAL_MUTED", crate::view::PAL_HISTORY_MUTED),
+        ("ROTULUS_PAL_MARKER", crate::view::PAL_MARKER),
+        ("ROTULUS_PAL_NICK_COLOR0", crate::view::PAL_NICK_COLOR0),
+        ("ROTULUS_PAL_TIMESTAMP", crate::view::PAL_TIMESTAMP),
+        ("ROTULUS_PAL_RULE", crate::view::PAL_RULE),
     ] {
         assert_eq!(define(name), rust, "{name} differs between C and Rust");
     }
     // The per-nick block is the palette's tail; if it isn't, a slot was
     // added after it and the count above has to account for it.
     assert_eq!(
-        define("HX_CHAT_PAL_NICK_COLOR0") + define("HX_CHAT_PAL_NICK_COLORS"),
+        define("ROTULUS_PAL_NICK_COLOR0") + define("ROTULUS_PAL_NICK_COLORS"),
         crate::view::PALETTE_COLS,
         "the per-nick colors should end the palette"
+    );
+}
+
+/// The run attribute bits and row constants cross the seam as bare
+/// numbers too. Hold the Rust side to the header's.
+#[test]
+fn abi_constants_match_rotulus_h() {
+    let header = include_str!("../include/rotulus.h");
+    let shift = |name: &str| -> u32 {
+        let prefix = format!("#define {name} ");
+        let line = header
+            .lines()
+            .find(|l| l.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("rotulus.h no longer defines {name}"));
+        let v = line[prefix.len()..].trim();
+        let n = v
+            .trim_start_matches("(1u << ")
+            .trim_end_matches(')')
+            .parse::<u32>()
+            .unwrap_or_else(|_| panic!("{name} is not (1u << n): {v:?}"));
+        1 << n
+    };
+    for (name, rust) in [
+        ("ROTULUS_ATTR_BOLD", crate::ffi::ATTR_BOLD),
+        ("ROTULUS_ATTR_ITALIC", crate::ffi::ATTR_ITALIC),
+        ("ROTULUS_ATTR_UNDERLINE", crate::ffi::ATTR_UNDERLINE),
+        ("ROTULUS_ATTR_STRIKETHROUGH", crate::ffi::ATTR_STRIKETHROUGH),
+        ("ROTULUS_ATTR_MONOSPACE", crate::ffi::ATTR_MONOSPACE),
+        ("ROTULUS_ATTR_REVERSE", crate::ffi::ATTR_REVERSE),
+        ("ROTULUS_ATTR_BACKGROUND", crate::ffi::ATTR_BACKGROUND),
+        ("ROTULUS_ATTR_RGB", crate::ffi::ATTR_RGB),
+        (
+            "ROTULUS_ATTR_BACKGROUND_RGB",
+            crate::ffi::ATTR_BACKGROUND_RGB,
+        ),
+    ] {
+        assert_eq!(
+            shift(name),
+            u32::from(rust),
+            "{name} differs between C and Rust"
+        );
+    }
+    assert_eq!(shift("ROTULUS_ROW_OUTGOING"), crate::ffi::ROW_OUTGOING);
+    assert_eq!(shift("ROTULUS_ROW_ACTION"), crate::ffi::ROW_ACTION);
+
+    // The row kinds are an enum, so their values are their order.
+    let kinds: Vec<&str> = header
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("ROTULUS_ROW_") && l.ends_with(','))
+        .map(|l| l.trim_end_matches(','))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "ROTULUS_ROW_MESSAGE",
+            "ROTULUS_ROW_SYSTEM",
+            "ROTULUS_ROW_HISTORY",
+            "ROTULUS_ROW_DIVIDER",
+            "ROTULUS_ROW_LOAD_OLDER",
+            "ROTULUS_ROW_LOAD_NEWER",
+        ]
+    );
+    assert_eq!(
+        [
+            crate::ffi::ROW_MESSAGE,
+            crate::ffi::ROW_SYSTEM,
+            crate::ffi::ROW_HISTORY,
+            crate::ffi::ROW_DIVIDER,
+            crate::ffi::ROW_LOAD_OLDER,
+            crate::ffi::ROW_LOAD_NEWER,
+        ],
+        [0, 1, 2, 3, 4, 5]
+    );
+}
+
+/// The structs C builds on the stack. A field added on one side only
+/// would shift every field after it, silently.
+#[test]
+fn abi_struct_layouts_are_what_c_computes() {
+    use std::mem::{align_of, size_of};
+    let ptr = size_of::<*const u8>();
+    // text, len, color, attrs, background (+2 pad), rgb, background_rgb.
+    let run = ptr + 4 + 2 + 2 + 4 + 4 + 4;
+    assert_eq!(
+        size_of::<crate::ffi::RotulusRun>(),
+        run.next_multiple_of(align_of::<*const u8>())
+    );
+    assert_eq!(
+        size_of::<crate::ffi::RotulusSpeaker>(),
+        (8 + ptr + 4).next_multiple_of(8)
     );
 }
 
@@ -201,7 +294,7 @@ fn cache_returns_consistent_widths() {
     let s = "cached";
     let a = Style::default();
     let b = Style {
-        fg: hxchat_layout::ColorRef::Palette(4),
+        fg: rotulus_layout::ColorRef::Palette(4),
         ..Default::default()
     };
     assert_eq!(m.run_width(s, a), m.run_width(s, b));
@@ -225,7 +318,7 @@ fn font_change_invalidates_the_cache() {
 
 // ---- the GTK smoke test (requires a display) ------------------------
 //
-// Every C2 bring-up crash lived in `class_init` or in widget
+// Every bring-up crash lived in `class_init` or in widget
 // construction, and none was visible to `cargo test`: gtk4-rs asserts an
 // initialised GTK inside the generated `class_init` itself
 // (gtk4-0.10.3/src/subclass/widget.rs:563), so even registering the type
@@ -242,7 +335,7 @@ fn font_change_invalidates_the_cache() {
 // one thread ever touches it, whatever the harness does.
 //
 // On display-less CI it no-ops. On a developer machine it exercises the
-// exact call sequence `create_chat` performs, which is what all three
+// exact call sequence an application's setup performs, which is what all three
 // crashes died in.
 
 use gtk4::glib::prelude::*;
@@ -269,18 +362,18 @@ fn gtk_class_and_construction_smoke() {
          Run it under `xvfb-run -a` (with GDK_BACKEND=x11), the way CI does."
     );
 
-    let t = crate::view::HxChatView::static_type();
+    let t = crate::view::RotulusView::static_type();
 
     // --- class_init ran at all -------------------------------------
     unsafe {
         let c = gtk4::glib::gobject_ffi::g_type_class_ref(t.into_glib());
-        assert!(!c.is_null(), "class_init failed for HxChatView");
+        assert!(!c.is_null(), "class_init failed for RotulusView");
         gtk4::glib::gobject_ffi::g_type_class_unref(c);
     }
 
     // --- the GtkScrollable properties are installed ----------------
     //
-    // Pins the third C2 crash: declaring fresh ParamSpecs named
+    // Pins the third bring-up crash: declaring fresh ParamSpecs named
     // "hadjustment" etc. collides with the interface's, GLib refuses to
     // install them, and g_object_new yields an object that fails
     // GTK_IS_WIDGET. ParamSpecOverride::for_interface is the fix.
@@ -299,44 +392,52 @@ fn gtk_class_and_construction_smoke() {
             );
             assert!(
                 !p.is_null(),
-                "GtkScrollable property {name:?} is not installed on HxChatView"
+                "GtkScrollable property {name:?} is not installed on RotulusView"
             );
         }
         gtk4::glib::gobject_ffi::g_type_class_unref(class as *mut _);
     }
 
-    // --- word_click resolves under both spellings ------------------
+    // --- the typed signals are registered ---------------------------
     //
-    // Pins the second C2 crash: glib-rs's Signal::builder panics on a
-    // non-canonical name, and that panic aborts out of class_init. The C
-    // callers all spell it "word_click".
+    // glib-rs's Signal::builder panics on a non-canonical name, and that
+    // panic aborts out of class_init; reaching here at all says they
+    // registered, and this says they are findable by the names the
+    // header documents.
     unsafe {
-        let hyphen = gtk4::glib::gobject_ffi::g_signal_lookup(
-            c"word-click".as_ptr() as *const _,
-            t.into_glib(),
-        );
-        let underscore = gtk4::glib::gobject_ffi::g_signal_lookup(
-            c"word_click".as_ptr() as *const _,
-            t.into_glib(),
-        );
-        assert_ne!(hyphen, 0, "word-click is not registered");
+        for name in [
+            c"link-activated",
+            c"link-menu",
+            c"speaker-activated",
+            c"speaker-menu",
+            c"load-more",
+            c"media-activated",
+            c"selection-changed",
+        ] {
+            let id =
+                gtk4::glib::gobject_ffi::g_signal_lookup(name.as_ptr() as *const _, t.into_glib());
+            assert_ne!(id, 0, "{name:?} is not registered");
+        }
         assert_eq!(
-            hyphen, underscore,
-            "chat.c and msg.c connect \"word_click\"; GLib must resolve it \
-             to the same signal as \"word-click\""
+            gtk4::glib::gobject_ffi::g_signal_lookup(
+                c"word-click".as_ptr() as *const _,
+                t.into_glib()
+            ),
+            0,
+            "word-click is gone"
         );
     }
 
     // --- a constructed view is a usable widget ---------------------
     //
-    // Pins the first C2 crash (use-after-free on the returned pointer)
+    // Pins the first bring-up crash (use-after-free on the returned pointer)
     // and re-checks the third: all three produced something that failed
     // exactly this.
-    let view = crate::view::HxChatView::new();
+    let view = crate::view::RotulusView::new();
     assert!(view.is::<gtk4::Widget>(), "not a GtkWidget");
     assert!(view.is::<gtk4::Scrollable>(), "not a GtkScrollable");
 
-    // --- it survives create_chat's call sequence -------------------
+    // --- it survives an application's setup calls ---------------
     view.set_font_from_string("Monospace 10");
     view.set_word_wrap(true);
     view.set_max_rows(500);
@@ -359,7 +460,7 @@ fn gtk_class_and_construction_smoke() {
     // --- the FFI path, on a floating pointer -----------------------
     //
     // The check the Rust-side construction above cannot make, and the
-    // one that would have caught the longest-running C2 bug.
+    // one that would have caught the longest-running bring-up bug.
     //
     // C receives the widget *floating* with refcount 1. glib-rs's
     // `from_glib_none` sinks floating references, so wrapping the
@@ -373,32 +474,58 @@ fn gtk_class_and_construction_smoke() {
     // it is still alive and still floating afterwards.
     unsafe {
         let pal = [gtk4::gdk::RGBA::BLACK; crate::view::PALETTE_COLS];
-        let raw = crate::ffi::hx_chat_view_new(pal.as_ptr() as *const gtk4::gdk::ffi::GdkRGBA, 1);
-        assert!(!raw.is_null(), "impl_new returned NULL");
+        let raw = crate::ffi::rotulus_view_new();
+        assert!(!raw.is_null(), "rotulus_view_new returned NULL");
         let as_obj = raw as *mut gtk4::glib::gobject_ffi::GObject;
         assert_ne!(
             gtk4::glib::gobject_ffi::g_object_is_floating(as_obj),
             0,
-            "impl_new must hand C a floating ref, like gtk_xtext_new"
+            "rotulus_view_new must hand C a floating ref, like a GTK constructor"
         );
 
-        // Every entry point create_chat calls, in order.
-        crate::ffi::hx_chat_view_set_font(raw, c"Monospace 10".as_ptr());
-        crate::ffi::hx_chat_view_set_word_wrap(raw, 1);
-        crate::ffi::hx_chat_view_set_max_lines(raw, 500);
-        crate::ffi::hx_chat_view_set_indent(raw, 1);
-        crate::ffi::hx_chat_view_set_time_stamp(raw, 1);
-        crate::ffi::hx_chat_view_set_max_indent(raw, 256);
-        let _ = crate::ffi::hx_chat_view_get_vadjustment(raw);
-        let mark = crate::ffi::hx_chat_view_append_indent(
+        // The entry points an application's setup calls.
+        crate::ffi::rotulus_view_set_palette(raw, pal.as_ptr() as *const gtk4::gdk::ffi::GdkRGBA);
+        crate::ffi::rotulus_view_set_font(raw, c"Monospace 10".as_ptr());
+        crate::ffi::rotulus_view_set_word_wrap(raw, 1);
+        crate::ffi::rotulus_view_set_max_lines(raw, 500);
+        crate::ffi::rotulus_view_set_indent(raw, 1);
+        crate::ffi::rotulus_view_set_show_timestamps(raw, 1);
+        crate::ffi::rotulus_view_set_max_indent(raw, 256);
+        crate::ffi::rotulus_view_set_link_schemes(
             raw,
-            c"<alice>".as_ptr(),
-            7,
-            c"hello".as_ptr(),
-            5,
-            0,
+            [
+                c"https://".as_ptr(),
+                c"hotline://".as_ptr(),
+                std::ptr::null(),
+            ]
+            .as_ptr(),
         );
-        assert!(!mark.is_null(), "append_indent returned no mark");
+        let _ = crate::ffi::rotulus_view_get_vadjustment(raw);
+        let gutter = [plain_run(c"<alice>")];
+        let body = [plain_run(c"hello")];
+        let row = crate::ffi::RotulusRow {
+            kind: crate::ffi::ROW_MESSAGE,
+            flags: 0,
+            stamp: 0,
+            speaker: crate::ffi::RotulusSpeaker {
+                key: 7,
+                nick: c"alice".as_ptr(),
+                nick_len: -1,
+            },
+            gutter: gutter.as_ptr(),
+            n_gutter: 1,
+            body: body.as_ptr(),
+            n_body: 1,
+        };
+        let mark = crate::ffi::rotulus_view_append(raw, &row);
+        assert!(!mark.is_null(), "append returned no mark");
+        assert_eq!(crate::ffi::rotulus_view_get_last(raw), mark);
+        assert_ne!(
+            crate::ffi::rotulus_view_replace(raw, mark, &row),
+            0,
+            "a live row can be replaced"
+        );
+        crate::ffi::rotulus_view_set_marker(raw, mark);
 
         // Still alive, still a widget, still ours to sink.
         //
@@ -426,13 +553,13 @@ fn gtk_class_and_construction_smoke() {
         assert_ne!(
             gtk4::glib::gobject_ffi::g_type_check_instance_is_a(
                 raw as *mut gtk4::glib::gobject_ffi::GTypeInstance,
-                crate::ffi::hx_chat_view_get_type(),
+                crate::ffi::rotulus_view_get_type(),
             ),
             0,
             "the widget was destroyed by an FFI call"
         );
 
-        // Clean up the way chat.c would — and check the view actually dies.
+        // Clean up the way a C caller would — and check the view actually dies.
         //
         // The refcount assertion above is a proxy for the property that
         // matters, and a proxy a future cycle could satisfy by accident (drop
@@ -452,8 +579,8 @@ fn gtk_class_and_construction_smoke() {
         );
     }
 
-    // --- selection + zoom (C3) -------------------------------------
-    let view = crate::view::HxChatView::new();
+    // --- selection + zoom -------------------------------------------
+    let view = crate::view::RotulusView::new();
     view.set_font_from_string("Monospace 10");
     view.set_indent(false);
     view.append(crate::view::plain_message("alpha"));
@@ -467,9 +594,9 @@ fn gtk_class_and_construction_smoke() {
     {
         let buf = view.imp_ref().buffer.borrow();
         let id = buf.id_at(0).expect("row 0");
-        let caret = hxchat_layout::Caret {
+        let caret = rotulus_layout::Caret {
             message: id,
-            source: hxchat_layout::LineSource::Block(0),
+            source: rotulus_layout::LineSource::Block(0),
             offset: 1,
         };
         let word = buf.select_word(&caret).expect("word select");
@@ -540,7 +667,7 @@ fn gtk_class_and_construction_smoke() {
         ),
         ("Sans 10", &"WWWWWWWWWW ".repeat(12), "a proportional font"),
     ] {
-        let view = crate::view::HxChatView::new();
+        let view = crate::view::RotulusView::new();
         view.set_font_from_string(font);
         view.set_indent(false);
         view.set_word_wrap(true);
@@ -616,6 +743,255 @@ fn gtk_class_and_construction_smoke() {
     }
 
     check_offscreen_animation_stops();
+    check_typed_signals();
+    check_replace_and_marker();
+}
+
+/// A row of runs, the way an application appends one.
+fn message_row(key: u64, nick: &str, body: &str) -> rotulus_layout::Message {
+    rotulus_layout::Message {
+        kind: rotulus_layout::MessageKind::Live,
+        timestamp: 1_000,
+        speaker: (key != 0).then(|| rotulus_layout::Speaker::new(key, nick)),
+        gutter: Some(rotulus_layout::ParsedText::plain(format!("<{nick}>"))),
+        blocks: {
+            let mut p = rotulus_layout::ParsedText::plain(body);
+            crate::links::autolink(&mut p, &rotulus_layout::Linkifier::default());
+            vec![rotulus_layout::Block::Text(p)].into()
+        },
+        flags: rotulus_layout::MessageFlags::NONE,
+    }
+}
+
+/// Lay a view out at 400x300 and paint it once, so hit-testing has line
+/// boxes to find.
+fn laid_out(view: &crate::view::RotulusView) -> gtk4::Box {
+    use gtk4::subclass::prelude::WidgetImpl;
+    let adj = gtk4::Adjustment::new(0.0, 0.0, 1.0, 1.0, 1.0, 1.0);
+    view.set_vadjustment(Some(&adj));
+    let holder = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    holder.append(view);
+    holder.allocate(400, 300, -1, None);
+    view.imp_ref().snapshot(&gtk4::Snapshot::new());
+    holder.allocate(400, 300, -1, None);
+    holder
+}
+
+/// The first widget-space point on row `row` whose hover target `want`
+/// accepts.
+fn find_point(
+    view: &crate::view::RotulusView,
+    row: usize,
+    want: impl Fn(&crate::view::HoverTarget) -> bool,
+) -> Option<(f64, f64)> {
+    let (top, height) = {
+        let mut buf = view.imp_ref().buffer.borrow_mut();
+        (
+            buf.index_mut().offset_of(row),
+            buf.index_mut().height_at(row),
+        )
+    };
+    let y0 = f64::from(crate::view::PAD_Y) + top as f64;
+    for dy in (1..height).step_by(4) {
+        for x in (crate::view::PAD_X..396).step_by(3) {
+            let (x, y) = (f64::from(x), y0 + f64::from(dy));
+            if view.hover_target_at(x, y).as_ref().is_some_and(&want) {
+                return Some((x, y));
+            }
+        }
+    }
+    None
+}
+
+/// Clicks reach the application as typed signals, not as words to match.
+fn check_typed_signals() {
+    use crate::view::HoverTarget;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let view = crate::view::RotulusView::new();
+    view.set_indent(true);
+    view.append(message_row(7, "al", "see https://example.com now"));
+    view.append(rotulus_layout::Message {
+        kind: rotulus_layout::MessageKind::LoadMore(rotulus_layout::LoadMoreDirection::Older),
+        timestamp: 1_000,
+        speaker: None,
+        gutter: None,
+        blocks: vec![rotulus_layout::Block::text("load older")].into(),
+        flags: rotulus_layout::MessageFlags::NONE,
+    });
+    view.append(rotulus_layout::Message {
+        kind: rotulus_layout::MessageKind::Live,
+        timestamp: 1_000,
+        speaker: None,
+        gutter: None,
+        blocks: vec![rotulus_layout::Block::Image {
+            token: 9,
+            size: None,
+            alt: "[image]".into(),
+        }]
+        .into(),
+        flags: rotulus_layout::MessageFlags::NONE,
+    });
+    let _holder = laid_out(&view);
+
+    let seen: Rc<RefCell<Vec<String>>> = Rc::default();
+    {
+        let seen = seen.clone();
+        // Handled, so the view doesn't go on to launch a browser.
+        view.connect_closure(
+            "link-activated",
+            false,
+            gtk4::glib::closure_local!(move |_: crate::view::RotulusView, href: String| -> bool {
+                seen.borrow_mut().push(format!("link {href}"));
+                true
+            }),
+        );
+    }
+    {
+        let seen = seen.clone();
+        view.connect_closure(
+            "speaker-activated",
+            false,
+            gtk4::glib::closure_local!(move |_: crate::view::RotulusView, key: u64| {
+                seen.borrow_mut().push(format!("speaker {key}"));
+            }),
+        );
+    }
+    {
+        let seen = seen.clone();
+        view.connect_closure(
+            "load-more",
+            false,
+            gtk4::glib::closure_local!(
+                move |_: crate::view::RotulusView, d: crate::view::LoadDirection| {
+                    seen.borrow_mut().push(format!("load {d:?}"));
+                }
+            ),
+        );
+    }
+    {
+        let seen = seen.clone();
+        view.connect_closure(
+            "media-activated",
+            false,
+            gtk4::glib::closure_local!(move |_: crate::view::RotulusView, token: u32| {
+                seen.borrow_mut().push(format!("media {token}"));
+            }),
+        );
+    }
+
+    let link = find_point(&view, 0, |t| matches!(t, HoverTarget::Link { .. }))
+        .expect("the link is hittable");
+    view.activate_at(link.0, link.1);
+    let nick = find_point(&view, 0, |t| matches!(t, HoverTarget::Nick { key: 7, .. }))
+        .expect("the nick is hittable");
+    view.activate_at(nick.0, nick.1);
+    let more = find_point(&view, 1, |t| matches!(t, HoverTarget::LoadMore { .. }))
+        .expect("the load-more row is hittable");
+    view.activate_at(more.0, more.1);
+    let media = find_point(&view, 2, |t| {
+        matches!(t, HoverTarget::Media { token: 9, .. })
+    })
+    .expect("the image is hittable");
+    view.activate_at(media.0, media.1);
+    assert_eq!(
+        *seen.borrow(),
+        [
+            "link https://example.com",
+            "speaker 7",
+            "load Older",
+            "media 9"
+        ]
+    );
+
+    // With activation off, a primary click on the link is just a click.
+    view.set_activate_links(false);
+    view.activate_at(link.0, link.1);
+    assert_eq!(
+        seen.borrow().len(),
+        4,
+        "a link doesn't activate when activation is off"
+    );
+    view.set_activate_links(true);
+
+    // Selection changes are announced, and has-selection follows them.
+    let changes = Rc::new(std::cell::Cell::new(0));
+    {
+        let changes = changes.clone();
+        view.connect_closure(
+            "selection-changed",
+            false,
+            gtk4::glib::closure_local!(move |_: crate::view::RotulusView| {
+                changes.set(changes.get() + 1);
+            }),
+        );
+    }
+    let notified = Rc::new(std::cell::Cell::new(0));
+    {
+        let notified = notified.clone();
+        view.connect_notify_local(Some("has-selection"), move |_, _| {
+            notified.set(notified.get() + 1)
+        });
+    }
+    view.select_all();
+    assert!(view.property::<bool>("has-selection"));
+    view.clear_selection();
+    assert!(!view.property::<bool>("has-selection"));
+    assert_eq!((changes.get(), notified.get()), (2, 2));
+}
+
+/// Replacing keeps a row's place and id; the marker follows its row out.
+fn check_replace_and_marker() {
+    let view = crate::view::RotulusView::new();
+    let a = view.append(message_row(1, "al", "draft"));
+    let b = view.append(message_row(2, "bo", "reply"));
+    assert!(view.replace(a, message_row(1, "al", "final text")));
+    assert_eq!(view.last(), Some(b), "a replace doesn't move the row");
+    {
+        let buf = view.imp_ref().buffer.borrow();
+        assert_eq!(buf.row_of(a), Some(0));
+        assert_eq!(buf.message(a).unwrap().to_plain_text(), "final text");
+    }
+    view.set_marker(Some(a));
+    assert_eq!(view.marker(), Some(a));
+    assert!(view.remove(a));
+    assert_eq!(view.marker(), None, "the marker goes with its row");
+    assert!(
+        !view.replace(a, message_row(1, "al", "late")),
+        "a stale mark replaces nothing"
+    );
+
+    // Properties round-trip, including the ones the setters wrap.
+    view.set_link_schemes(&["hotline://"]);
+    assert_eq!(view.property::<Vec<String>>("link-schemes"), ["hotline://"]);
+    view.set_link_schemes(&[]);
+    assert!(view
+        .property::<Vec<String>>("link-schemes")
+        .contains(&"https://".to_string()));
+    view.set_zoom_permille(1250);
+    assert!((view.property::<f64>("zoom") - 1.25).abs() < 1e-9);
+    view.set_stamp_format("");
+    assert_eq!(
+        view.property::<String>("timestamp-format"),
+        crate::view::DEFAULT_STAMP_FORMAT
+    );
+
+    #[cfg(feature = "v4_14")]
+    {
+        let text = view
+            .with_a11y(|m, _| Some(m.contents(0, u32::MAX).to_string()))
+            .expect("the accessible text builds");
+        assert_eq!(text, "<bo> reply");
+        view.append(message_row(3, "cy", "new"));
+        let text = view
+            .with_a11y(|m, _| Some(m.contents(0, u32::MAX).to_string()))
+            .unwrap();
+        assert_eq!(
+            text, "<bo> reply\n<cy> new",
+            "an append extends the accessible text"
+        );
+    }
 }
 
 /// An animated image drawn on screen runs the frame tick; scrolled out of
@@ -626,7 +1002,7 @@ fn check_offscreen_animation_stops() {
     use gtk4::prelude::*;
     use gtk4::subclass::prelude::WidgetImpl;
 
-    let view = crate::view::HxChatView::new();
+    let view = crate::view::RotulusView::new();
     let adj = gtk4::Adjustment::new(0.0, 0.0, 1.0, 1.0, 1.0, 1.0);
     view.set_vadjustment(Some(&adj));
     let holder = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
@@ -639,17 +1015,18 @@ fn check_offscreen_animation_stops() {
     let ticking = || view.imp_ref().anim_tick.borrow().is_some();
 
     const TOKEN: u32 = 7;
-    view.append(hxchat_layout::Message {
-        kind: hxchat_layout::MessageKind::Live,
+    view.append(rotulus_layout::Message {
+        kind: rotulus_layout::MessageKind::Live,
         timestamp: 0,
         speaker: None,
         gutter: None,
-        blocks: vec![hxchat_layout::Block::Image {
+        blocks: vec![rotulus_layout::Block::Image {
             token: TOKEN,
             size: None,
             alt: "gif".into(),
-        }],
-        flags: hxchat_layout::MessageFlags::NONE,
+        }]
+        .into(),
+        flags: rotulus_layout::MessageFlags::NONE,
     });
     let texture = |v: u8| -> gtk4::gdk::Texture {
         gtk4::gdk::MemoryTexture::new(
@@ -698,25 +1075,44 @@ fn check_offscreen_animation_stops() {
     assert!(ticking(), "the next paint should start it again");
 }
 
-// ---- run-based append (C6) ------------------------------------------
+// ---- run-based append ------------------------------------------------
 
 /// Build a C run array from Rust and hand it to the FFI converter.
 ///
 /// Headless: `runs_to_text` touches no GTK, which is the point of
 /// keeping the conversion separate from the widget.
-fn to_text(runs: &[(&str, i16, u16)]) -> hxchat_layout::ParsedText {
+/// A run with only the four common fields set, as C writes them.
+fn run_of(
+    text: *const std::ffi::c_char,
+    len: std::ffi::c_int,
+    color: i16,
+    attrs: u16,
+) -> crate::ffi::RotulusRun {
+    crate::ffi::RotulusRun {
+        text,
+        len,
+        color,
+        attrs,
+        background: 0,
+        rgb: 0,
+        background_rgb: 0,
+    }
+}
+
+fn plain_run(t: &'static std::ffi::CStr) -> crate::ffi::RotulusRun {
+    run_of(t.as_ptr(), -1, -1, 0)
+}
+
+fn to_text(runs: &[(&str, i16, u16)]) -> rotulus_layout::ParsedText {
     let cstrings: Vec<std::ffi::CString> = runs
         .iter()
         .map(|(t, _, _)| std::ffi::CString::new(*t).unwrap())
         .collect();
-    let c_runs: Vec<crate::ffi::HxChatRun> = runs
+    let c_runs: Vec<crate::ffi::RotulusRun> = runs
         .iter()
         .zip(&cstrings)
-        .map(|((t, color, attrs), cs)| crate::ffi::HxChatRun {
-            text: cs.as_ptr(),
-            len: t.len() as std::ffi::c_int,
-            color: *color,
-            attrs: *attrs,
+        .map(|((t, color, attrs), cs)| {
+            run_of(cs.as_ptr(), t.len() as std::ffi::c_int, *color, *attrs)
         })
         .collect();
     unsafe { crate::ffi::runs_to_text(c_runs.as_ptr(), c_runs.len() as std::ffi::c_int) }
@@ -744,8 +1140,8 @@ fn styled_runs_carry_byte_ranges_into_the_joined_text() {
     assert_eq!(p.spans.len(), 2, "only the styled runs get spans");
     assert_eq!(&p.text[p.spans[0].range.clone()], "<");
     assert_eq!(&p.text[p.spans[1].range.clone()], ">");
-    assert_eq!(p.spans[0].style.fg, hxchat_layout::ColorRef::Palette(5));
-    assert_eq!(p.spans[1].style.fg, hxchat_layout::ColorRef::Palette(5));
+    assert_eq!(p.spans[0].style.fg, rotulus_layout::ColorRef::Palette(5));
+    assert_eq!(p.spans[1].style.fg, rotulus_layout::ColorRef::Palette(5));
 }
 
 #[test]
@@ -756,7 +1152,7 @@ fn run_ranges_survive_multibyte_text() {
     assert_eq!(p.text, "héllo wörld");
     assert_eq!(p.spans.len(), 1);
     assert_eq!(&p.text[p.spans[0].range.clone()], "wörld");
-    assert!(p.spans[0].style.attrs.contains(hxchat_layout::Attrs::BOLD));
+    assert!(p.spans[0].style.attrs.contains(rotulus_layout::Attrs::BOLD));
 }
 
 #[test]
@@ -768,16 +1164,11 @@ fn empty_runs_are_skipped_not_recorded() {
 
 #[test]
 fn a_run_with_len_minus_one_uses_strlen() {
-    // chat_view.h documents len as "bytes, or -1 for strlen". cslice
+    // rotulus.h documents len as "bytes, or -1 for strlen". cslice
     // treats anything <= 0 as empty, so -1 silently dropped the run —
     // an ABI the header promised and the implementation didn't keep.
     let cs = std::ffi::CString::new("hello").unwrap();
-    let runs = [crate::ffi::HxChatRun {
-        text: cs.as_ptr(),
-        len: -1,
-        color: -1,
-        attrs: 0,
-    }];
+    let runs = [run_of(cs.as_ptr(), -1, -1, 0)];
     let p = unsafe { crate::ffi::runs_to_text(runs.as_ptr(), 1) };
     assert_eq!(p.text, "hello");
 }
@@ -790,22 +1181,20 @@ fn a_speakers_nick_is_length_delimited_not_nul_delimited() {
     // feeds the gutter-width estimate in wrap.rs, so it would have
     // reserved a column wide enough for the whole message.
     let line = std::ffi::CString::new("misha:  hello world").unwrap();
-    let sp = crate::ffi::HxChatSpeaker {
-        uid: 7,
+    let sp = crate::ffi::RotulusSpeaker {
+        key: 7,
         nick: line.as_ptr(),
         nick_len: 5,
-        outgoing: 0,
     };
-    let got = unsafe { crate::ffi::speaker_of(&sp) }.expect("uid 7 is known");
+    let got = unsafe { crate::ffi::speaker_of(&sp) }.expect("key 7 is known");
     assert_eq!(got.nick, "misha");
-    assert_eq!(got.uid, 7);
+    assert_eq!(got.key, 7);
 
     // -1 still means "this really is a C string".
-    let whole = crate::ffi::HxChatSpeaker {
-        uid: 7,
+    let whole = crate::ffi::RotulusSpeaker {
+        key: 7,
         nick: line.as_ptr(),
         nick_len: -1,
-        outgoing: 0,
     };
     let got = unsafe { crate::ffi::speaker_of(&whole) }.unwrap();
     assert_eq!(got.nick, "misha:  hello world");
@@ -814,20 +1203,22 @@ fn a_speakers_nick_is_length_delimited_not_nul_delimited() {
 // ---- markdown rendering ---------------------------------------------
 
 /// Build a message body from one plain run, the way live chat does.
-fn body_of(text: &str, markdown: bool) -> Vec<hxchat_layout::Block> {
+fn body_of(text: &str, markdown: bool) -> Vec<rotulus_layout::Block> {
     let cs = std::ffi::CString::new(text).unwrap();
-    let runs = [crate::ffi::HxChatRun {
-        text: cs.as_ptr(),
-        len: text.len() as std::ffi::c_int,
-        color: -1,
-        attrs: 0,
-    }];
-    unsafe { crate::ffi::body_blocks(runs.as_ptr(), 1, markdown) }
+    let runs = [run_of(cs.as_ptr(), text.len() as std::ffi::c_int, -1, 0)];
+    unsafe {
+        crate::ffi::body_blocks(
+            runs.as_ptr(),
+            1,
+            markdown,
+            &rotulus_layout::Linkifier::default(),
+        )
+    }
 }
 
-fn text_of(b: &hxchat_layout::Block) -> &hxchat_layout::ParsedText {
+fn text_of(b: &rotulus_layout::Block) -> &rotulus_layout::ParsedText {
     match b {
-        hxchat_layout::Block::Text(p) | hxchat_layout::Block::Quote { content: p, .. } => p,
+        rotulus_layout::Block::Text(p) | rotulus_layout::Block::Quote { content: p, .. } => p,
         _ => panic!("not a text block"),
     }
 }
@@ -846,8 +1237,8 @@ fn markdown_renders_inline_emphasis() {
     assert_eq!(
         styled,
         vec![
-            ("this", hxchat_layout::Attrs::BOLD),
-            ("that", hxchat_layout::Attrs::ITALIC),
+            ("this", rotulus_layout::Attrs::BOLD),
+            ("that", rotulus_layout::Attrs::ITALIC),
         ]
     );
 }
@@ -865,7 +1256,7 @@ fn a_fenced_block_becomes_an_inert_code_block() {
     let blocks = body_of("see:\n```\nlet x = **not bold**;\n```\ndone", true);
     assert_eq!(blocks.len(), 3, "paragraph, code, paragraph");
     match &blocks[1] {
-        hxchat_layout::Block::Code { text, .. } => {
+        rotulus_layout::Block::Code { text, .. } => {
             assert!(
                 text.contains("**not bold**"),
                 "code contents stay literal: {text:?}"
@@ -879,7 +1270,7 @@ fn a_fenced_block_becomes_an_inert_code_block() {
 fn a_quote_becomes_a_quote_block_with_its_markers_gone() {
     let blocks = body_of("> quoted **bold**", true);
     match &blocks[0] {
-        hxchat_layout::Block::Quote { content, depth } => {
+        rotulus_layout::Block::Quote { content, depth } => {
             assert_eq!(content.text, "quoted bold");
             assert_eq!(*depth, 1);
         }
@@ -895,13 +1286,15 @@ fn a_styled_body_keeps_its_colour_under_the_markdown() {
     // and everything else at full contrast.
     let text = "muted **bold** tail";
     let cs = std::ffi::CString::new(text).unwrap();
-    let runs = [crate::ffi::HxChatRun {
-        text: cs.as_ptr(),
-        len: text.len() as std::ffi::c_int,
-        color: 37, // HX_CHAT_PAL_HISTORY_MUTED
-        attrs: 0,
-    }];
-    let blocks = unsafe { crate::ffi::body_blocks(runs.as_ptr(), 1, true) };
+    let runs = [run_of(cs.as_ptr(), text.len() as std::ffi::c_int, 37, 0)]; // ROTULUS_PAL_MUTED
+    let blocks = unsafe {
+        crate::ffi::body_blocks(
+            runs.as_ptr(),
+            1,
+            true,
+            &rotulus_layout::Linkifier::default(),
+        )
+    };
     let p = text_of(&blocks[0]);
     assert_eq!(p.text, "muted bold tail");
 
@@ -926,7 +1319,7 @@ fn a_styled_body_keeps_its_colour_under_the_markdown() {
         );
         assert_eq!(
             s.style.fg,
-            hxchat_layout::ColorRef::Palette(37),
+            rotulus_layout::ColorRef::Palette(37),
             "{:?} lost the row colour",
             &p.text[s.range.clone()]
         );
@@ -936,7 +1329,7 @@ fn a_styled_body_keeps_its_colour_under_the_markdown() {
 
     // ...and the emphasis is still there on top.
     assert!(p.spans.iter().any(|s| &p.text[s.range.clone()] == "bold"
-        && s.style.attrs.contains(hxchat_layout::Attrs::BOLD)));
+        && s.style.attrs.contains(rotulus_layout::Attrs::BOLD)));
 }
 
 #[test]
@@ -947,13 +1340,15 @@ fn the_base_colour_tiles_across_multibyte_text() {
     // both a wrong render and a potential panic.
     let text = "héllo **wörld** ☃";
     let cs = std::ffi::CString::new(text).unwrap();
-    let runs = [crate::ffi::HxChatRun {
-        text: cs.as_ptr(),
-        len: text.len() as std::ffi::c_int,
-        color: 37,
-        attrs: 0,
-    }];
-    let blocks = unsafe { crate::ffi::body_blocks(runs.as_ptr(), 1, true) };
+    let runs = [run_of(cs.as_ptr(), text.len() as std::ffi::c_int, 37, 0)];
+    let blocks = unsafe {
+        crate::ffi::body_blocks(
+            runs.as_ptr(),
+            1,
+            true,
+            &rotulus_layout::Linkifier::default(),
+        )
+    };
     let p = text_of(&blocks[0]);
     assert_eq!(p.text, "héllo wörld ☃");
 
@@ -976,21 +1371,15 @@ fn a_body_the_caller_styled_run_by_run_is_left_alone() {
     // out of markdown entirely.
     let a = std::ffi::CString::new("plain ").unwrap();
     let b = std::ffi::CString::new("**loud**").unwrap();
-    let runs = [
-        crate::ffi::HxChatRun {
-            text: a.as_ptr(),
-            len: 6,
-            color: -1,
-            attrs: 0,
-        },
-        crate::ffi::HxChatRun {
-            text: b.as_ptr(),
-            len: 8,
-            color: 4,
-            attrs: 0,
-        },
-    ];
-    let blocks = unsafe { crate::ffi::body_blocks(runs.as_ptr(), 2, true) };
+    let runs = [run_of(a.as_ptr(), 6, -1, 0), run_of(b.as_ptr(), 8, 4, 0)];
+    let blocks = unsafe {
+        crate::ffi::body_blocks(
+            runs.as_ptr(),
+            2,
+            true,
+            &rotulus_layout::Linkifier::default(),
+        )
+    };
     assert_eq!(blocks.len(), 1);
     assert_eq!(text_of(&blocks[0]).text, "plain **loud**");
 }
@@ -1003,7 +1392,7 @@ fn a_one_line_fence_reaches_the_view_as_a_code_block() {
     let blocks = body_of("```hello world```", true);
     assert_eq!(blocks.len(), 1);
     match &blocks[0] {
-        hxchat_layout::Block::Code { text, .. } => assert_eq!(text, "hello world"),
+        rotulus_layout::Block::Code { text, .. } => assert_eq!(text, "hello world"),
         other => panic!("expected code, got {other:?}"),
     }
 }
@@ -1018,32 +1407,65 @@ fn inline_code_carries_the_code_attr_for_the_renderer_to_tint() {
     assert_eq!(p.text, "try ls -l now");
     assert!(
         p.spans.iter().any(|s| &p.text[s.range.clone()] == "ls -l"
-            && s.style.attrs.contains(hxchat_layout::Attrs::CODE)),
+            && s.style.attrs.contains(rotulus_layout::Attrs::CODE)),
         "the code span must be marked: {:?}",
         p.spans
     );
 }
 
 #[test]
-fn rows_drawn_in_the_history_palette_are_history() {
-    let run = |t: &'static std::ffi::CStr, color: usize| crate::ffi::HxChatRun {
-        text: t.as_ptr(),
-        len: t.to_bytes().len() as i32,
-        color: color as i16,
-        attrs: 0,
-    };
-    let muted = crate::view::PAL_HISTORY_MUTED;
-    let (nick, body) = (run(c"<alice>", muted), run(c"hi", muted));
-    let kind = unsafe { crate::ffi::runs_kind(&nick, 1, &body, 1) };
-    assert!(kind.is_history(), "an all-muted row is history: {kind:?}");
-
-    let live_body = run(c"hi", 0);
-    let kind = unsafe { crate::ffi::runs_kind(&nick, 1, &live_body, 1) };
-    assert_eq!(kind, hxchat_layout::MessageKind::Live);
-    let kind = unsafe { crate::ffi::runs_kind(std::ptr::null(), 0, std::ptr::null(), 0) };
+fn extended_run_fields_take_effect_only_under_their_bits() {
+    let cs = std::ffi::CString::new("x").unwrap();
+    let mut r = run_of(cs.as_ptr(), 1, 3, 0);
+    r.background = 5;
+    r.rgb = 0x123456;
+    let plain = crate::ffi::run_style(&r);
+    assert_eq!(plain.fg, rotulus_layout::ColorRef::Palette(3));
     assert_eq!(
-        kind,
-        hxchat_layout::MessageKind::Live,
-        "an empty row isn't history"
+        plain.bg,
+        rotulus_layout::ColorRef::Default,
+        "no BACKGROUND bit, no background"
     );
+
+    r.attrs = crate::ffi::ATTR_BACKGROUND | crate::ffi::ATTR_RGB | crate::ffi::ATTR_REVERSE;
+    let styled = crate::ffi::run_style(&r);
+    assert_eq!(styled.fg, rotulus_layout::ColorRef::Rgb(0x123456));
+    assert_eq!(styled.bg, rotulus_layout::ColorRef::Palette(5));
+    assert!(styled.attrs.contains(rotulus_layout::Attrs::REVERSE));
+}
+
+#[test]
+fn a_view_links_its_own_schemes() {
+    let only = rotulus_layout::Linkifier::new(["hotline://"]);
+    let text = "hotline://example.org and https://example.com";
+    let cs = std::ffi::CString::new(text).unwrap();
+    let runs = [run_of(cs.as_ptr(), text.len() as std::ffi::c_int, -1, 0)];
+    let blocks = unsafe { crate::ffi::body_blocks(runs.as_ptr(), 1, true, &only) };
+    let p = text_of(&blocks[0]);
+    let hrefs: Vec<_> = p.links.iter().map(|l| l.href.as_str()).collect();
+    assert_eq!(hrefs, ["hotline://example.org"]);
+}
+
+#[cfg(feature = "mirc")]
+#[test]
+fn mirc_runs_point_into_the_callers_text() {
+    let text = "a \x02bold\x02 \x0304red";
+    let cs = std::ffi::CString::new(text).unwrap();
+    let mut n = 0;
+    let runs = unsafe { crate::mirc_ffi::rotulus_mirc_parse(cs.as_ptr(), -1, &mut n) };
+    assert_eq!(n, 4);
+    let joined = unsafe { crate::ffi::runs_to_text(runs, n) };
+    assert_eq!(joined.text, "a bold red");
+    let styles: Vec<_> = joined
+        .spans
+        .iter()
+        .map(|s| (&joined.text[s.range.clone()], s.style))
+        .collect();
+    assert!(styles
+        .iter()
+        .any(|(t, s)| *t == "bold" && s.attrs.contains(rotulus_layout::Attrs::BOLD)));
+    assert!(styles
+        .iter()
+        .any(|(t, s)| *t == "red" && s.fg == rotulus_layout::ColorRef::Palette(4)));
+    unsafe { gtk4::glib::ffi::g_free(runs as *mut _) };
 }

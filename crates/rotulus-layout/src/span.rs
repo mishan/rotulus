@@ -78,13 +78,10 @@ impl std::fmt::Debug for Attrs {
 
 /// Where a colour comes from.
 ///
-/// `Palette` indices 32..37 are the theme UI roles (see `chat_view.h`'s
-/// `HX_CHAT_PAL_*`). Indices 0..31 are the legacy mIRC slots and exist
-/// only so the compat shim (`crate::mirc`) can round-trip during the
-/// coexistence period — they have no producer once xtext is deleted at
-/// C5. `Rgb` is what Hotline actually gives us: the per-user `nick_color`
-/// attribute on the user record, which is a real `0x00RRGGBB` value and
-/// was never in-band markup.
+/// `Palette` indices 0..31 are the mIRC colors, which is how IRC
+/// formatting (`rotulus-mirc`) addresses them; the slots above are the
+/// theme roles (see `rotulus.h`'s `ROTULUS_PAL_*`). `Rgb` is a literal
+/// colour: an IRC extended or hex colour, or a per-person nick colour.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
 pub enum ColorRef {
     /// Inherit — the view's default foreground / background.
@@ -158,6 +155,27 @@ pub struct ParsedText {
 }
 
 impl ParsedText {
+    /// Give back the spare capacity building left behind.
+    ///
+    /// A parser pushes spans one at a time, so a line with two styled runs
+    /// typically holds room for four; kept for the life of the scrollback,
+    /// that slack is the largest single cost of a row. The buffer compacts
+    /// every message it takes (see `Message::compact`).
+    ///
+    /// By copying into an exact allocation rather than `shrink_to_fit`:
+    /// shrinking in place splits every block into an odd-sized remainder,
+    /// and a scrollback's worth of those fragments the heap badly enough
+    /// that appending runs three times slower and scrolling five. The copy
+    /// frees whole blocks the allocator can hand straight back out.
+    pub fn compact(&mut self) {
+        exact_string(&mut self.text);
+        exact_vec(&mut self.spans);
+        exact_vec(&mut self.links);
+        for l in &mut self.links {
+            exact_string(&mut l.href);
+        }
+    }
+
     /// A plain, unstyled string.
     pub fn plain(text: impl Into<String>) -> ParsedText {
         ParsedText {
@@ -387,4 +405,21 @@ fn link_style(base: Style, id: LinkId) -> Style {
     s.link = Some(id);
     s.attrs = s.attrs.union(Attrs::UNDERLINE);
     s
+}
+
+/// Move `s` into an allocation exactly its length, if it has spare room.
+/// See [`ParsedText::compact`] for why a copy and not `shrink_to_fit`.
+pub(crate) fn exact_string(s: &mut String) {
+    if s.capacity() > s.len() {
+        *s = s.as_str().to_owned();
+    }
+}
+
+/// [`exact_string`] for a vector.
+pub(crate) fn exact_vec<T>(v: &mut Vec<T>) {
+    if v.capacity() > v.len() {
+        let mut exact = Vec::with_capacity(v.len());
+        exact.append(v);
+        *v = exact;
+    }
 }

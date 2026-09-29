@@ -1,9 +1,9 @@
 //! The structured message model.
 //!
 //! This is the thing xtext never had. There, a chat line was a byte
-//! string with in-band escapes; a uid, a message id, an avatar or a hit
-//! region had nowhere to live, which is why every feature since Phase 9
-//! had to be smuggled in as a magic word (`hxmedia:N`) or a magic
+//! string with in-band escapes; a speaker, a message id, an avatar or a hit
+//! region had nowhere to live, which is why late features had to be
+//! smuggled in as a magic word (`hxmedia:N`) or a magic
 //! non-breaking-space sentinel. Here a message is a value with fields.
 //!
 //! See docs/chat-view.md "The message model".
@@ -15,7 +15,7 @@ use crate::span::ParsedText;
 /// Allocated by the buffer, never reused within a session. Marks handed
 /// out to callers are `MessageId`s, so a row that gets trimmed or cleared
 /// leaves the caller holding an id that simply no longer resolves — the
-/// weak-reference semantics `chat_view.h` already documents, but without
+/// weak-reference semantics `rotulus.h` already documents, but without
 /// the dangling-pointer hazard xtext's raw `textentry *` cursors had.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub struct MessageId(pub u64);
@@ -64,32 +64,23 @@ impl MessageKind {
     }
 }
 
-/// Which icon to draw in a speaker's gutter.
-///
-/// Resolved by the view against infrastructure that already exists and
-/// is already per-uid and main-thread: `gtkhx_avatar_get` for the
-/// fogWraith GIF avatar, `load_icon` for the classic 16-bit icon id.
-/// The layout engine only needs the intrinsic size, which it asks the
-/// [`crate::measure::TextMeasure`] implementation for.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum IconRef {
-    #[default]
-    None,
-    /// Classic Hotline icon id (the `0x0068` user attribute).
-    IconId(u16),
-    /// Per-uid GIF avatar (Phase 10).
-    Avatar(u16),
-}
-
 /// Who said it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Speaker {
-    pub uid: u16,
+    /// The application's identity for this person, or 0 when it has
+    /// none.
+    ///
+    /// Opaque to the view: it is compared for grouping, handed back in
+    /// `speaker-menu`, and passed to the avatar resolver, and nothing
+    /// else. A Hotline client uses its 16-bit user id; an IRC client
+    /// might hash the account name. 0 is "unknown" rather than "user
+    /// zero", and a row with an unknown speaker gets no avatar slot,
+    /// since there would be nothing to resolve it against.
+    pub key: u64,
     pub nick: String,
-    /// Hotline's real per-user colour: a `0x00RRGGBB` attribute on the
-    /// user record. `None` means "use the view's default nick colour".
+    /// A per-person colour, `0x00RRGGBB`. `None` means "use the view's
+    /// default nick colour".
     pub color: Option<u32>,
-    pub icon: IconRef,
 }
 
 impl Message {
@@ -98,9 +89,9 @@ impl Message {
     ///
     /// Both halves matter, and each catches a case the other misses:
     ///
-    /// - The **uid** separates two people who happen to share a nick.
+    /// - The **key** separates two people who happen to share a nick.
     /// - The **rendered nick** separates one person before and after a
-    ///   rename. The uid survives a rename, so keying on it alone would
+    ///   rename. The key survives a rename, so keying on it alone would
     ///   group the messages and the new name would simply never appear —
     ///   which is worse than repeating it, since the change is exactly
     ///   what the reader needs to see.
@@ -118,19 +109,20 @@ impl Message {
         // "connecting", "connected", "login ok" — into one block under
         // a single tag, which reads as one event rather than three.
         //
-        // Checked on the kind rather than on `speaker.is_none()`: a
-        // pre-1.5 server sends chat with no uid, and those rows are real
-        // messages from a real person that should still group by nick.
+        // Checked on the kind rather than on `speaker.is_none()`: some
+        // sources carry no identity at all (a pre-1.5 Hotline server
+        // sends chat with no uid), and those rows are real messages from
+        // a real person that should still group by nick.
         if self.kind == MessageKind::System {
             return None;
         }
-        let uid = self.speaker.as_ref().map(|s| s.uid).unwrap_or(0);
+        let key = self.speaker.as_ref().map(|s| s.key).unwrap_or(0);
         // A row with no gutter at all is a system line and never groups.
         let nick = match &self.gutter {
             Some(g) if !g.text.is_empty() => g.text.as_str(),
             _ => return None,
         };
-        Some(GroupKey { uid, nick })
+        Some(GroupKey { key, nick })
     }
 }
 
@@ -139,20 +131,19 @@ impl Message {
 /// Equality is on both fields: same person *and* same displayed name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GroupKey<'a> {
-    /// 0 when the server sent no uid — then the nick carries the whole
-    /// decision, which is the best available answer on those servers.
-    pub uid: u16,
+    /// 0 when the speaker's identity is unknown — then the nick carries
+    /// the whole decision, which is the best available answer.
+    pub key: u64,
     /// The gutter text as rendered.
     pub nick: &'a str,
 }
 
 impl Speaker {
-    pub fn new(uid: u16, nick: impl Into<String>) -> Speaker {
+    pub fn new(key: u64, nick: impl Into<String>) -> Speaker {
         Speaker {
-            uid,
+            key,
             nick: nick.into(),
             color: None,
-            icon: IconRef::None,
         }
     }
 }
@@ -205,6 +196,79 @@ impl Block {
     }
 }
 
+/// A message's body.
+///
+/// Nearly every message is one text block, which is held inline; a body
+/// markdown split into paragraphs, code and quotes holds a vector. A plain
+/// `Vec` for every row would cost a separate allocation (and its header)
+/// for a single block, which is most of a short message's body. Reads go
+/// through the slice either way.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Blocks {
+    One(Block),
+    Many(Vec<Block>),
+}
+
+impl Blocks {
+    pub fn new(mut v: Vec<Block>) -> Blocks {
+        if v.len() == 1 {
+            Blocks::One(v.pop().expect("one block"))
+        } else {
+            Blocks::Many(v)
+        }
+    }
+}
+
+impl std::ops::Deref for Blocks {
+    type Target = [Block];
+
+    fn deref(&self) -> &[Block] {
+        match self {
+            Blocks::One(b) => std::slice::from_ref(b),
+            Blocks::Many(v) => v,
+        }
+    }
+}
+
+impl std::ops::DerefMut for Blocks {
+    fn deref_mut(&mut self) -> &mut [Block] {
+        match self {
+            Blocks::One(b) => std::slice::from_mut(b),
+            Blocks::Many(v) => v,
+        }
+    }
+}
+
+impl From<Vec<Block>> for Blocks {
+    fn from(v: Vec<Block>) -> Blocks {
+        Blocks::new(v)
+    }
+}
+
+impl From<Block> for Blocks {
+    fn from(b: Block) -> Blocks {
+        Blocks::One(b)
+    }
+}
+
+impl<'a> IntoIterator for &'a Blocks {
+    type Item = &'a Block;
+    type IntoIter = std::slice::Iter<'a, Block>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Blocks {
+    type Item = &'a mut Block;
+    type IntoIter = std::slice::IterMut<'a, Block>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
 /// Per-message rendering flags.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct MessageFlags(pub u8);
@@ -222,7 +286,7 @@ impl MessageFlags {
     /// Direction, not sender identity — "is the sender me" cannot tell
     /// the echo of a message you just sent from the server's copy of it
     /// when you message yourself, and grouping needs to. See
-    /// `chat_view.h`'s `HxChatSpeaker.outgoing`.
+    /// `rotulus.h`'s `RotulusSpeaker.outgoing`.
     pub const OUTGOING: MessageFlags = MessageFlags(1 << 3);
     /// Server tombstone for a deleted message.
     pub const DELETED: MessageFlags = MessageFlags(1 << 4);
@@ -273,26 +337,15 @@ impl std::fmt::Debug for MessageFlags {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Message {
     pub kind: MessageKind,
-    /// Unix seconds. `0` means "stamp on append", matching the `stamp`
-    /// argument the C append API already takes.
+    /// Unix seconds. The C API turns a `stamp` of 0 into "now".
     pub timestamp: i64,
     pub speaker: Option<Speaker>,
-    /// Pre-rendered left column, overriding whatever [`Self::speaker`]
-    /// would produce.
-    ///
-    /// This is the compat path's escape hatch, and it earns its keep
-    /// until C6. `chat.c` builds the nick column as a styled string —
-    /// `\00312<\003alice\00312>\003`, brackets in one colour and the
-    /// nick in another — and during the A/B the new view has to
-    /// reproduce that *exactly*, which a bare `Speaker { nick }` can't.
-    /// So the compat append path parses the left text into a
-    /// `ParsedText` and puts it here.
-    ///
-    /// Once `chat.c` hands over structured messages (C6), the view
-    /// renders the gutter from `speaker` — nick, colour, avatar — and
-    /// this goes away with the mIRC shim.
+    /// The nick column as the application styled it — brackets in one
+    /// colour, the name in another, a status tag — overriding the bare
+    /// [`Self::speaker`] nick, which only sizes the column when this is
+    /// absent.
     pub gutter: Option<ParsedText>,
-    pub blocks: Vec<Block>,
+    pub blocks: Blocks,
     pub flags: MessageFlags,
 }
 
@@ -304,7 +357,7 @@ impl Message {
             timestamp: 0,
             speaker: Some(speaker),
             gutter: None,
-            blocks: vec![Block::Text(body)],
+            blocks: Blocks::One(Block::Text(body)),
             flags: MessageFlags::NONE,
         }
     }
@@ -316,8 +369,36 @@ impl Message {
             timestamp: 0,
             speaker: None,
             gutter: None,
-            blocks: vec![Block::Text(body)],
+            blocks: Blocks::One(Block::Text(body)),
             flags: MessageFlags::NONE,
+        }
+    }
+
+    /// Give back the spare capacity building the message left behind. See
+    /// [`ParsedText::compact`].
+    pub fn compact(&mut self) {
+        use crate::span::{exact_string, exact_vec};
+        if let Some(s) = &mut self.speaker {
+            exact_string(&mut s.nick);
+        }
+        if let Some(g) = &mut self.gutter {
+            g.compact();
+        }
+        if let Blocks::Many(v) = &mut self.blocks {
+            exact_vec(v);
+        }
+        for b in self.blocks.iter_mut() {
+            match b {
+                Block::Text(p) => p.compact(),
+                Block::Quote { content, .. } => content.compact(),
+                Block::Code { text, language } => {
+                    exact_string(text);
+                    if let Some(l) = language {
+                        exact_string(l);
+                    }
+                }
+                Block::Image { alt, .. } => exact_string(alt),
+            }
         }
     }
 

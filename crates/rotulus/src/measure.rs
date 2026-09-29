@@ -18,8 +18,8 @@
 //! - a small cache keyed on `(text, style)` short-circuits the repeat
 //!   measurements that wrapping produces for the same run.
 
-use hxchat_layout::{Attrs, FontMetrics, Style, TextMeasure};
 use pango::prelude::*;
+use rotulus_layout::{Attrs, FontMetrics, Style, TextMeasure};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
@@ -35,7 +35,7 @@ pub struct PangoMeasure {
     font: pango::FontDescription,
     metrics: FontMetrics,
     /// Zoom, per-mille. Applied to the font size, so the whole row
-    /// scales together (scoping §3.7).
+    /// scales together.
     zoom_permille: u32,
     /// Measured run widths, nested attrs → text → width.
     ///
@@ -86,7 +86,7 @@ impl PangoMeasure {
     /// A measurer with no display attached.
     ///
     /// `pangocairo`'s default font map works without a `GdkDisplay`,
-    /// which is what lets the C2 widget's geometry be exercised in unit
+    /// which is what lets the widget's geometry be exercised in unit
     /// tests on CI.
     pub fn headless(font: &str) -> PangoMeasure {
         let fm = pangocairo::FontMap::default();
@@ -277,7 +277,7 @@ impl PangoMeasure {
     ///
     /// Every path in [`TextMeasure::fit_prefix`] that would otherwise
     /// return a zero-length prefix routes here instead, because a zero
-    /// prefix leaves [`hxchat_layout::wrap`]'s loop unable to advance.
+    /// prefix leaves [`rotulus_layout::wrap`]'s loop unable to advance.
     /// The returned width may exceed the caller's budget; that is the
     /// documented exemption, and one clipped grapheme beats a hung UI.
     fn min_progress(&self, text: &str, style: Style) -> (usize, u32) {

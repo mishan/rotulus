@@ -6,25 +6,25 @@
 //! `>` quotes) are recognised by [`split_blocks`] before this scanner
 //! runs; everything else CommonMark defines is deliberately absent.
 //!
-//! **Why hand-written rather than `pulldown-cmark`.** Three reasons, from
-//! the scoping doc: it has no inline-only mode, so we would be filtering
+//! **Why hand-written rather than `pulldown-cmark`.** Three reasons: it
+//! has no inline-only mode, so we would be filtering
 //! a block-level event stream and fighting CommonMark's block rules to
 //! suppress headings, thematic breaks and setext underlines — all of
 //! which occur constantly in real chat prose (`# 1`, `---`, `====`); its
 //! event stream would still need converting into byte-ranged
 //! [`Span`](crate::span::Span)s, which is most of the work; and a scanner
 //! for six constructs is small enough to be exhaustively tested and
-//! predictable on pathological input. `hxproto` is hand-written for
-//! the same reasons.
+//! predictable on pathological input.
 //!
 //! **What is deliberately not supported**, and why: headings (`#` opens
 //! far too many ordinary chat lines), images (`![]()` — inline media has
 //! a server-validated upload/download pipeline and must not be
 //! bypassable by an arbitrary URL), tables, raw HTML, reference links,
-//! footnotes, thematic breaks, setext headings, and autolinking (the
-//! existing URL detector in `gtkurl.c` owns that and has its own scheme
-//! list).
+//! footnotes, thematic breaks, setext headings, and autolinking (that is
+//! [`crate::linkify`]'s, which also supplies the scheme list a
+//! `[label](url)` is checked against).
 
+use crate::linkify::Linkifier;
 use crate::span::{Attrs, ParsedText, SpanBuilder, Style};
 use std::ops::Range;
 
@@ -33,18 +33,16 @@ use std::ops::Range;
 /// recurse the parser into the stack guard.
 const MAX_DEPTH: u8 = 8;
 
-/// URL schemes a `[label](url)` link may point at.
+/// Whether a `[label](url)` link may point at `url` under the default
+/// scheme list.
 ///
-/// Matches the set `gtkurl.c` already accepts, minus the bare-host forms
-/// (`www.`, `ftp.`) which only make sense for autolinking. Anything else
-/// — `javascript:`, `data:`, `file:`, or an unrecognised scheme — makes
-/// the whole construct render as literal text, delimiters included, so
-/// the user sees exactly what was typed rather than a link they can't
-/// inspect.
+/// Anything else — `javascript:`, `data:`, `file:`, or an unrecognised
+/// scheme — makes the whole construct render as literal text, delimiters
+/// included, so the user sees exactly what was typed rather than a link
+/// they can't inspect. A view with its own scheme list uses
+/// [`parse_inline_with`].
 pub fn scheme_allowed(url: &str) -> bool {
-    const ALLOWED: [&str; 5] = ["http://", "https://", "ftp://", "hotline://", "mailto:"];
-    let lower = url.trim().to_ascii_lowercase();
-    ALLOWED.iter().any(|s| lower.starts_with(s))
+    Linkifier::default().allows(url)
 }
 
 /// A block-level piece of a message body.
@@ -174,14 +172,20 @@ pub fn split_blocks(body: &str) -> Vec<RawBlock> {
 /// Never fails and never panics: any construct that doesn't close
 /// renders as the literal characters that were typed.
 pub fn parse_inline(src: &str) -> ParsedText {
+    parse_inline_with(src, &Linkifier::default())
+}
+
+/// [`parse_inline`], with `[label](url)` links checked against `links`
+/// rather than the default scheme list.
+pub fn parse_inline_with(src: &str, links: &Linkifier) -> ParsedText {
     let mut b = SpanBuilder::new();
-    scan(src, Style::default(), 0, &mut b);
+    scan(src, Style::default(), 0, links, &mut b);
     let out = b.finish();
     out.debug_assert_well_formed();
     out
 }
 
-fn scan(src: &str, base: Style, depth: u8, out: &mut SpanBuilder) {
+fn scan(src: &str, base: Style, depth: u8, links: &Linkifier, out: &mut SpanBuilder) {
     let bytes = src.as_bytes();
     let mut i = 0usize;
     // Start of the current literal run, flushed lazily so plain text
@@ -243,7 +247,13 @@ fn scan(src: &str, base: Style, depth: u8, out: &mut SpanBuilder) {
                 if can_open(bytes, i + 2) {
                     if let Some(close) = find_delim(src, i + 2, delim) {
                         flush_lit!(i);
-                        scan(&src[i + 2..close], base.with_attrs(attr), depth + 1, out);
+                        scan(
+                            &src[i + 2..close],
+                            base.with_attrs(attr),
+                            depth + 1,
+                            links,
+                            out,
+                        );
                         i = close + 2;
                         lit = i;
                         continue;
@@ -267,6 +277,7 @@ fn scan(src: &str, base: Style, depth: u8, out: &mut SpanBuilder) {
                         &src[i + 1..close],
                         base.with_attrs(Attrs::ITALIC),
                         depth + 1,
+                        links,
                         out,
                     );
                     i = close + 1;
@@ -280,7 +291,7 @@ fn scan(src: &str, base: Style, depth: u8, out: &mut SpanBuilder) {
             // [label](url)
             if c == b'[' {
                 if let Some((label, href, end)) = parse_link(src, i) {
-                    if scheme_allowed(href) {
+                    if links.allows(href) {
                         flush_lit!(i);
                         // The id must exist before the label is emitted
                         // so it can ride in the label's Style; the
@@ -294,7 +305,7 @@ fn scan(src: &str, base: Style, depth: u8, out: &mut SpanBuilder) {
                         // markdown, and `parse_link` balances brackets,
                         // so re-scanning the label would happily parse
                         // the inner one.
-                        scan(label, label_style, MAX_DEPTH, out);
+                        scan(label, label_style, MAX_DEPTH, links, out);
                         out.set_link_range(id, start..out.len());
                         i = end;
                         lit = i;

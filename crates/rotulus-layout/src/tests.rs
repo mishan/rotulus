@@ -81,8 +81,8 @@ fn md_unmatched_delimiters_stay_literal() {
 #[test]
 fn md_underscore_respects_word_boundaries() {
     // snake_case must survive; this project's chat is full of it.
-    let p = markdown::parse_inline("call hx_chat_view_append please");
-    assert_eq!(p.text, "call hx_chat_view_append please");
+    let p = markdown::parse_inline("call rotulus_view_append please");
+    assert_eq!(p.text, "call rotulus_view_append please");
     assert!(p.spans.is_empty());
 
     // But a real word-boundary underscore still emphasises.
@@ -347,7 +347,8 @@ fn a_code_block_is_only_as_wide_as_its_widest_line() {
     msg.blocks = vec![Block::Code {
         text: "hi\nlonger line\nx".to_string(),
         language: None,
-    }];
+    }]
+    .into();
     let l = layout_message(&msg, &params(1000), LayoutGeneration::default(), &m);
     let widths: Vec<u32> = l.lines.iter().map(|lb| lb.width).collect();
     assert_eq!(widths, vec![20, 110, 10]);
@@ -482,7 +483,7 @@ fn wrap_accounts_for_style_changes_mid_line() {
 fn wrap_accounts_for_code_runs() {
     let m = StyleMeasure { base: 10 };
     // Code measures 3x.
-    let p = markdown::parse_inline("run `hx_chat_view_append_indent` now");
+    let p = markdown::parse_inline("run `rotulus_view_append_indent` now");
     let msg = Message::system(p.clone());
     let l = layout_message(&msg, &params(120), LayoutGeneration::default(), &m);
     assert_no_line_overflows(&p, &l.lines, 120, &m);
@@ -518,7 +519,8 @@ fn empty_quote_still_has_a_line_box() {
         blocks: vec![Block::Quote {
             content: ParsedText::plain(""),
             depth: 1,
-        }],
+        }]
+        .into(),
         flags: MessageFlagsNone::NONE,
     };
     let l = layout_message(&msg, &params(400), LayoutGeneration::default(), &m);
@@ -542,7 +544,8 @@ fn empty_alt_image_still_has_a_line_box() {
             token: 1,
             size: None,
             alt: String::new(),
-        }],
+        }]
+        .into(),
         flags: MessageFlagsNone::NONE,
     };
     let l = layout_message(&msg, &params(400), LayoutGeneration::default(), &m);
@@ -565,7 +568,7 @@ fn gutter_gets_its_own_line_box() {
         timestamp: 0,
         speaker: None,
         gutter: Some(ParsedText::plain("<alice>")),
-        blocks: vec![Block::Text(ParsedText::plain("hello"))],
+        blocks: vec![Block::Text(ParsedText::plain("hello"))].into(),
         flags: MessageFlagsNone::NONE,
     };
     let l = layout_message(&msg, &p, LayoutGeneration::default(), &m);
@@ -612,7 +615,8 @@ fn image_block_has_real_pixel_height() {
                 height: 240,
             }),
             alt: "[image]".into(),
-        }],
+        }]
+        .into(),
         flags: MessageFlagsNone::NONE,
     };
     let l = layout_message(&msg, &params(400), LayoutGeneration::default(), &m);
@@ -635,7 +639,8 @@ fn undecoded_image_measures_as_placeholder() {
             token: 7,
             size: None,
             alt: "[image]".into(),
-        }],
+        }]
+        .into(),
         flags: MessageFlagsNone::NONE,
     };
     let l = layout_message(&msg, &params(400), LayoutGeneration::default(), &m);
@@ -1058,7 +1063,8 @@ fn buffer_image_decode_grows_the_row() {
             token: 42,
             size: None,
             alt: "[image]".into(),
-        }],
+        }]
+        .into(),
         flags: MessageFlagsNone::NONE,
     };
     let id = b.append(msg, &m);
@@ -1160,7 +1166,7 @@ fn every_visible_row_has_a_layout_after_ensure_visible() {
     for i in 0..30 {
         b.append(
             Message::live(
-                Speaker::new(i as u16, "n".repeat(1 + i as usize)),
+                Speaker::new(i as u64, "n".repeat(1 + i as usize)),
                 ParsedText::plain("hello there"),
             ),
             &m,
@@ -1384,7 +1390,8 @@ fn selection_over_an_image_copies_its_alt_text() {
                     height: 40,
                 }),
                 alt: "[image: cat.png]".into(),
-            }],
+            }]
+            .into(),
             flags: MessageFlagsNone::NONE,
         },
         &m,
@@ -1434,7 +1441,7 @@ fn gutter_is_right_aligned_against_the_body_column() {
         timestamp: 0,
         speaker: None,
         gutter: Some(ParsedText::plain("<alice>")), // 7 chars = 70px
-        blocks: vec![Block::Text(ParsedText::plain("hi"))],
+        blocks: vec![Block::Text(ParsedText::plain("hi"))].into(),
         flags: MessageFlagsNone::NONE,
     };
     let l = layout_message(&msg, &p, LayoutGeneration::default(), &m);
@@ -1475,7 +1482,7 @@ fn hit_test_distinguishes_gutter_from_body_on_the_same_line() {
             timestamp: 0,
             speaker: None,
             gutter: Some(ParsedText::plain("<alice>")),
-            blocks: vec![Block::Text(ParsedText::plain("hello"))],
+            blocks: vec![Block::Text(ParsedText::plain("hello"))].into(),
             flags: MessageFlagsNone::NONE,
         },
         &m,
@@ -1518,7 +1525,7 @@ fn selecting_a_nick_yields_the_nick_text() {
             timestamp: 0,
             speaker: None,
             gutter: Some(ParsedText::plain("<alice>")),
-            blocks: vec![Block::Text(ParsedText::plain("hello"))],
+            blocks: vec![Block::Text(ParsedText::plain("hello"))].into(),
             flags: MessageFlagsNone::NONE,
         },
         &m,
@@ -1697,7 +1704,7 @@ fn word_at_handles_multibyte() {
 
 #[test]
 fn a_decoded_image_grows_its_row_without_moving_the_anchor() {
-    // The C4 payoff, and the thing xtext was worst at: a decode landing
+    // The thing xtext was worst at: a decode landing
     // *above* the viewport must not shift what the user is reading.
     // xtext had to recompute the entry's subline list, diff the count,
     // and patch num_lines plus every scroll anchor by hand; here the
@@ -1717,7 +1724,8 @@ fn a_decoded_image_grows_its_row_without_moving_the_anchor() {
                 token: 9,
                 size: None,
                 alt: "[image]".into(),
-            }],
+            }]
+            .into(),
             flags: MessageFlagsNone::NONE,
         },
         &m,
@@ -1771,7 +1779,7 @@ fn gutter_buf() -> (ChatBuffer, FixedMeasure) {
                 timestamp: 0,
                 speaker: None,
                 gutter: Some(ParsedText::plain(nick)),
-                blocks: vec![Block::Text(ParsedText::plain("hello"))],
+                blocks: vec![Block::Text(ParsedText::plain("hello"))].into(),
                 flags: MessageFlagsNone::NONE,
             },
             &m,
@@ -1881,7 +1889,7 @@ fn a_row_with_no_gutter_still_reserves_the_stamp_column() {
         timestamp: 0,
         speaker: None,
         gutter: Some(ParsedText::plain("<alice>")), // 70px
-        blocks: vec![Block::Text(ParsedText::plain("hi"))],
+        blocks: vec![Block::Text(ParsedText::plain("hi"))].into(),
         flags: MessageFlagsNone::NONE,
     };
     let l2 = layout_message(&with_nick, &p, LayoutGeneration::default(), &m);
@@ -2011,7 +2019,8 @@ fn selected_rows_separates_blocks_the_way_to_plain_text_does() {
                 language: None,
             },
             Block::Text(ParsedText::plain("done")),
-        ],
+        ]
+        .into(),
         flags: MessageFlagsNone::NONE,
     };
     let id = b.append(msg, &m);
@@ -2096,7 +2105,7 @@ fn dragging_the_separator_pins_the_gutter() {
         timestamp: 0,
         speaker: None,
         gutter: Some(ParsedText::plain(nick)),
-        blocks: vec![Block::Text(ParsedText::plain("hi"))],
+        blocks: vec![Block::Text(ParsedText::plain("hi"))].into(),
         flags: MessageFlagsNone::NONE,
     };
 
@@ -2338,7 +2347,7 @@ fn search_walks_rows_in_reading_order_including_gutters() {
                 timestamp: 0,
                 speaker: None,
                 gutter: Some(ParsedText::plain(nick)),
-                blocks: vec![Block::Text(ParsedText::plain(body))],
+                blocks: vec![Block::Text(ParsedText::plain(body))].into(),
                 flags: MessageFlagsNone::NONE,
             },
             &m,
@@ -2579,7 +2588,7 @@ fn ensure_visible_can_widen_the_gutter_so_read_it_after() {
             timestamp: 0,
             speaker: None,
             gutter: Some(ParsedText::plain("<misha>")),
-            blocks: vec![Block::Text(ParsedText::plain("hello hello"))],
+            blocks: vec![Block::Text(ParsedText::plain("hello hello"))].into(),
             flags: MessageFlagsNone::NONE,
         },
         &m,
@@ -2597,7 +2606,7 @@ fn ensure_visible_can_widen_the_gutter_so_read_it_after() {
     );
 }
 
-// ---- message grouping (C6) ------------------------------------------
+// ---- message grouping ------------------------------------------------
 
 fn said(uid: u16, nick: &str, body: &str, at: i64) -> Message {
     Message {
@@ -2606,10 +2615,10 @@ fn said(uid: u16, nick: &str, body: &str, at: i64) -> Message {
         speaker: if uid == 0 {
             None
         } else {
-            Some(crate::message::Speaker::new(uid, nick))
+            Some(crate::message::Speaker::new(u64::from(uid), nick))
         },
         gutter: Some(ParsedText::plain(format!("<{nick}>"))),
-        blocks: vec![Block::Text(ParsedText::plain(body))],
+        blocks: vec![Block::Text(ParsedText::plain(body))].into(),
         flags: MessageFlagsNone::NONE,
     }
 }
@@ -2995,7 +3004,7 @@ fn same_direction_still_groups() {
     );
 }
 
-// ---- avatar gutter (C6) ---------------------------------------------
+// ---- avatar gutter ---------------------------------------------------
 
 #[test]
 fn only_a_group_head_gets_an_avatar_box() {
@@ -3014,7 +3023,7 @@ fn only_a_group_head_gets_an_avatar_box() {
     let cont = b.layout_at(1).unwrap();
     assert!(head.avatar.is_some(), "the head shows the icon");
     assert!(cont.avatar.is_none(), "a continuation does not repeat it");
-    assert_eq!(head.avatar.unwrap().uid, 7);
+    assert_eq!(head.avatar.unwrap().key, 7);
 }
 
 #[test]
@@ -3183,7 +3192,7 @@ fn a_real_multi_line_fence_still_works() {
 
 #[test]
 fn select_all_shaped_selection_covers_the_buffer() {
-    // Mirrors HxChatView::select_all's caret construction exactly, to
+    // Mirrors RotulusView::select_all's caret construction exactly, to
     // find out whether "Select All does nothing" is the model or the UI.
     let m = FixedMeasure::new(10);
     let mut p = params(2000);
@@ -3245,7 +3254,8 @@ fn select_all_covers_the_gutter_and_every_block() {
                     text: "x = 1".into(),
                     language: None,
                 },
-            ],
+            ]
+            .into(),
             flags: MessageFlagsNone::NONE,
         },
         &m,
@@ -3564,4 +3574,272 @@ fn re_deriving_the_offset_after_layout_reaches_the_bottom() {
         settled + u64::from(vh),
         "the newest row should end exactly at the bottom edge"
     );
+}
+
+// ---- link detection -------------------------------------------------
+
+fn links_in(l: &crate::linkify::Linkifier, text: &str) -> Vec<String> {
+    l.scan(text)
+        .into_iter()
+        .map(|r| text[r].to_string())
+        .collect()
+}
+
+#[test]
+fn scan_finds_scheme_and_bare_urls() {
+    let l = crate::linkify::Linkifier::default();
+    assert_eq!(
+        links_in(&l, "see https://example.com/x and www.example.org now"),
+        ["https://example.com/x", "www.example.org"]
+    );
+}
+
+#[test]
+fn scan_drops_sentence_punctuation_but_keeps_a_balanced_paren() {
+    let l = crate::linkify::Linkifier::default();
+    assert_eq!(
+        links_in(&l, "go to https://example.com."),
+        ["https://example.com"]
+    );
+    assert_eq!(
+        links_in(&l, "(https://example.com)"),
+        ["https://example.com"]
+    );
+    assert_eq!(
+        links_in(&l, "https://en.wikipedia.org/wiki/Hotline_(software)"),
+        ["https://en.wikipedia.org/wiki/Hotline_(software)"]
+    );
+}
+
+#[test]
+fn scan_needs_a_boundary_before_the_scheme() {
+    let l = crate::linkify::Linkifier::default();
+    assert!(links_in(&l, "xhttps://example.com").is_empty());
+    assert_eq!(
+        links_in(&l, "<https://example.com>"),
+        ["https://example.com"]
+    );
+}
+
+#[test]
+fn scan_ignores_a_bare_scheme_with_nothing_after_it() {
+    let l = crate::linkify::Linkifier::default();
+    assert!(links_in(&l, "type https:// then the host").is_empty());
+}
+
+#[test]
+fn scan_is_case_insensitive_and_multibyte_safe() {
+    let l = crate::linkify::Linkifier::default();
+    let text = "héllo → HTTPS://example.com/ø done";
+    let found = l.scan(text);
+    assert_eq!(found.len(), 1);
+    assert!(text.is_char_boundary(found[0].start) && text.is_char_boundary(found[0].end));
+    assert_eq!(&text[found[0].clone()], "HTTPS://example.com/ø");
+}
+
+#[test]
+fn the_scheme_list_is_the_applications() {
+    let default = crate::linkify::Linkifier::default();
+    assert!(links_in(&default, "hotline://server.example").is_empty());
+
+    let hotline = crate::linkify::Linkifier::new(
+        crate::linkify::DEFAULT_SCHEMES
+            .iter()
+            .copied()
+            .chain(["hotline://"]),
+    );
+    assert_eq!(
+        links_in(&hotline, "hotline://server.example"),
+        ["hotline://server.example"]
+    );
+    assert!(hotline.allows("hotline://server.example"));
+    assert!(!default.allows("hotline://server.example"));
+}
+
+#[test]
+fn words_classify_and_normalise_like_the_scanner() {
+    let l = crate::linkify::Linkifier::default();
+    assert!(l.is_url("https://example.com"));
+    assert!(l.is_url("www.example.com"));
+    assert!(l.is_url("someone@example.com"));
+    assert!(!l.is_url("someone@example."));
+    assert!(!l.is_url("plain"));
+    assert!(
+        !l.has_scheme("someone@example.com"),
+        "an email has no scheme"
+    );
+
+    assert_eq!(l.normalize("https://example.com"), "https://example.com");
+    assert_eq!(l.normalize("www.example.com"), "https://www.example.com");
+    assert_eq!(l.normalize("ftp.example.com"), "ftp://ftp.example.com");
+    assert_eq!(
+        l.normalize("someone@example.com"),
+        "mailto:someone@example.com"
+    );
+}
+
+#[test]
+fn markdown_links_follow_the_scheme_list() {
+    let only_https = crate::linkify::Linkifier::new(["https://"]);
+    let p = markdown::parse_inline_with("[a](https://x.example) [b](ftp://y.example)", &only_https);
+    assert_eq!(p.links.len(), 1, "only the https link is allowed");
+    assert_eq!(p.links[0].href, "https://x.example");
+    assert!(
+        p.text.contains("[b](ftp://y.example)"),
+        "the refused link stays literal"
+    );
+}
+
+// ---- single-column layout -------------------------------------------
+
+fn nick_row(nick: &str, body: &str) -> Message {
+    Message {
+        kind: crate::message::MessageKind::Live,
+        timestamp: 0,
+        speaker: Some(Speaker::new(1, nick)),
+        gutter: Some(ParsedText::plain(format!("<{nick}>"))),
+        blocks: vec![Block::Text(ParsedText::plain(body))].into(),
+        flags: MessageFlagsNone::NONE,
+    }
+}
+
+#[test]
+fn single_column_puts_the_nick_beside_the_body() {
+    let m = FixedMeasure::new(10);
+    let l = layout_message(
+        &nick_row("al", "hi there"),
+        &params(400),
+        LayoutGeneration::default(),
+        &m,
+    );
+    let gutter = l
+        .lines
+        .iter()
+        .find(|b| b.source == crate::wrap::LineSource::Gutter)
+        .expect("the gutter is drawn");
+    assert_eq!((gutter.x, gutter.y), (0, 0));
+    let body = l
+        .lines
+        .iter()
+        .find(|b| b.source == crate::wrap::LineSource::Block(0))
+        .unwrap();
+    // "<al>" is 40 px, then one space.
+    assert_eq!(
+        (body.x, body.y),
+        (50, 0),
+        "the body starts beside the nick, on the same line"
+    );
+    assert_eq!(l.height, 16, "one line tall");
+}
+
+#[test]
+fn single_column_wraps_later_lines_to_the_left_edge() {
+    let m = FixedMeasure::new(10);
+    // 100 px wide: "<al> " leaves 50 px (5 chars) on the first line.
+    let l = layout_message(
+        &nick_row("al", "aaaa bbbb cccc"),
+        &params(100),
+        LayoutGeneration::default(),
+        &m,
+    );
+    let body: Vec<_> = l
+        .lines
+        .iter()
+        .filter(|b| b.source == crate::wrap::LineSource::Block(0))
+        .collect();
+    assert_eq!(body[0].x, 50);
+    assert!(body[0].width <= 50, "the first line fits beside the nick");
+    assert!(
+        body[1..].iter().all(|b| b.x == 0),
+        "continuation lines use the full width"
+    );
+}
+
+#[test]
+fn single_column_starts_past_the_timestamp() {
+    let m = FixedMeasure::new(10);
+    let mut p = params(400);
+    p.stamp_width = 30;
+    let l = layout_message(&nick_row("al", "hi"), &p, LayoutGeneration::default(), &m);
+    let gutter = l
+        .lines
+        .iter()
+        .find(|b| b.source == crate::wrap::LineSource::Gutter)
+        .unwrap();
+    assert_eq!(gutter.x, 30, "the nick sits after the stamp");
+    let body = l
+        .lines
+        .iter()
+        .find(|b| b.source == crate::wrap::LineSource::Block(0))
+        .unwrap();
+    assert_eq!(body.x, 80);
+
+    // A row with no gutter still clears the stamp.
+    let sys = layout_message(
+        &Message::system(ParsedText::plain("notice")),
+        &p,
+        LayoutGeneration::default(),
+        &m,
+    );
+    assert_eq!(sys.lines[0].x, 30);
+}
+
+#[test]
+fn single_column_puts_a_code_block_under_the_nick() {
+    let m = FixedMeasure::new(10);
+    let mut msg = nick_row("al", "");
+    msg.blocks = vec![Block::Code {
+        text: "x = 1".into(),
+        language: None,
+    }]
+    .into();
+    let l = layout_message(&msg, &params(400), LayoutGeneration::default(), &m);
+    let code = l
+        .lines
+        .iter()
+        .find(|b| b.source == crate::wrap::LineSource::Block(0))
+        .unwrap();
+    assert_eq!(code.x, 0);
+    assert!(code.y >= 16, "the code block starts below the nick's line");
+}
+
+#[test]
+fn single_column_drops_a_long_nick_onto_its_own_line() {
+    let m = FixedMeasure::new(10);
+    let l = layout_message(
+        &nick_row(&"n".repeat(30), "hello"),
+        &params(200),
+        LayoutGeneration::default(),
+        &m,
+    );
+    let body = l
+        .lines
+        .iter()
+        .find(|b| b.source == crate::wrap::LineSource::Block(0))
+        .unwrap();
+    assert_eq!(
+        (body.x, body.y),
+        (0, 16),
+        "no room beside the nick: the body goes below it"
+    );
+}
+
+#[test]
+fn single_column_estimates_are_never_low() {
+    let m = FixedMeasure::new(10);
+    let mut p = params(100);
+    p.stamp_width = 20;
+    for (nick, body) in [
+        ("al", "aaaa bbbb cccc dddd"),
+        ("someone", "x"),
+        ("n", "a\nb\nc"),
+    ] {
+        let msg = nick_row(nick, body);
+        let real = layout_message(&msg, &p, LayoutGeneration::default(), &m).height;
+        let est = estimate_height(&msg, &p, &m);
+        assert!(
+            est >= real,
+            "{nick}/{body:?}: estimated {est} below the real {real}"
+        );
+    }
 }

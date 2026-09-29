@@ -10,20 +10,20 @@
 //! The scrollback sizes are the instrument check. The engine's central
 //! claim is that a frame costs O(visible), not O(scrollback), so
 //! `first_paint`, `relayout`, `scroll_walk` and `live_at_cap` should report
-//! about the same time at 2,000 and 20,000 messages. Where they scale with
+//! about the same time at 2,000, 20,000 and 200,000 messages. Where they scale with
 //! the size, either the claim is broken there or the benchmark stopped
 //! measuring what it says; docs/performance.md records which is which.
 //!
-//! Run: `cargo bench -p hxchat-layout`. See docs/performance.md.
+//! Run: `cargo bench -p rotulus-layout`. See docs/performance.md.
 
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
-use hxchat_layout::markdown::parse_inline;
-use hxchat_layout::{ChatBuffer, FixedMeasure, LayoutParams, Message, Speaker};
+use rotulus_layout::markdown::parse_inline;
+use rotulus_layout::{ChatBuffer, FixedMeasure, LayoutParams, Message, Speaker};
 use std::hint::black_box;
 
 const WIDTH: u32 = 800;
 const VIEWPORT: u32 = 600;
-const SIZES: [usize; 2] = [2_000, 20_000];
+const SIZES: [usize; 3] = [2_000, 20_000, 200_000];
 
 const WORDS: &[&str] = &[
     "hotline",
@@ -74,9 +74,10 @@ fn corpus(n: usize) -> Vec<Message> {
                 .collect();
             let nick = NICKS[i % NICKS.len()];
             Message::live(
-                Speaker::new(i as u16 % 64, nick),
+                Speaker::new((i % 64) as u64, nick),
                 parse_inline(&text.join(" ")),
             )
+            .with_timestamp(1_700_000_000 + i as i64)
         })
         .collect()
 }
@@ -105,6 +106,9 @@ fn paint(b: &mut ChatBuffer, measure: &FixedMeasure) -> usize {
 fn bench_ingest(c: &mut Criterion) {
     let measure = FixedMeasure::new(8);
     let mut g = c.benchmark_group("ingest");
+    // Each iteration rebuilds a scrollback; at 200,000 rows the default
+    // hundred samples take minutes to say what ten say.
+    g.sample_size(10);
     for n in SIZES {
         g.throughput(Throughput::Elements(n as u64));
         g.bench_with_input(BenchmarkId::from_parameter(n), &n, |bch, &n| {
@@ -129,6 +133,9 @@ fn bench_ingest(c: &mut Criterion) {
 fn bench_first_paint(c: &mut Criterion) {
     let measure = FixedMeasure::new(8);
     let mut g = c.benchmark_group("first_paint");
+    // Each iteration rebuilds a scrollback; at 200,000 rows the default
+    // hundred samples take minutes to say what ten say.
+    g.sample_size(10);
     for n in SIZES {
         g.bench_with_input(BenchmarkId::from_parameter(n), &n, |bch, &n| {
             bch.iter_batched(
@@ -172,6 +179,9 @@ fn bench_scroll_walk(c: &mut Criterion) {
     const FRAMES: u64 = 120;
     let measure = FixedMeasure::new(8);
     let mut g = c.benchmark_group("scroll_walk");
+    // Each iteration rebuilds a scrollback; at 200,000 rows the default
+    // hundred samples take minutes to say what ten say.
+    g.sample_size(10);
     g.throughput(Throughput::Elements(FRAMES));
     for n in SIZES {
         g.bench_with_input(BenchmarkId::from_parameter(n), &n, |bch, &n| {
@@ -239,14 +249,17 @@ fn bench_markdown(c: &mut Criterion) {
     });
 }
 
+// The parser first: it allocates, and running it after groups that build
+// and free 200,000-row buffers measures the allocator's fragmentation
+// rather than the parser.
 criterion_group!(
     benches,
+    bench_markdown,
     bench_ingest,
     bench_first_paint,
     bench_relayout,
     bench_scroll_walk,
     bench_live_at_cap,
-    bench_search,
-    bench_markdown
+    bench_search
 );
 criterion_main!(benches);

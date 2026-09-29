@@ -6,7 +6,7 @@
 //! model — does not, and keeping the font stack behind a trait is what
 //! lets the whole engine run under `cargo test` on display-less CI.
 //!
-//! The view (C2) supplies a Pango-backed implementation. The tests here
+//! The view supplies a Pango-backed implementation. The tests here
 //! supply [`FixedMeasure`], where every character is exactly N pixels
 //! wide, which makes wrap assertions exact and readable instead of
 //! font-dependent and brittle.
@@ -113,8 +113,7 @@ pub trait TextMeasure {
     /// Rendered size of an image block, given its intrinsic size and the
     /// width available.
     ///
-    /// Default: scale down to fit, never up, preserving aspect ratio —
-    /// which is what the Phase 9.E media path already does.
+    /// Default: scale down to fit, never up, preserving aspect ratio.
     fn image_size(&self, intrinsic: (u32, u32), max_width: u32) -> (u32, u32) {
         let (w, h) = intrinsic;
         if w == 0 || h == 0 {

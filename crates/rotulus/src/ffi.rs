@@ -1,27 +1,26 @@
-//! The C ABI.
+//! The C ABI declared in `include/rotulus.h`.
 //!
-//! Mirrors `src/chat_view.h`, one `hx_chat_view_*` per
-//! `hx_chat_view_*`. The C side (`chat_view.c`) is the dispatcher: it
-//! decides at construction which backend a view is, then routes every
-//! later call by widget type. That is why these are `_impl_`-prefixed
-//! rather than simply defining the public names — both backends have to
-//! coexist in one binary until C5.
+//! **Marks.** `RotulusMark *` is an opaque handle, and here it is a
+//! [`MessageId`] rather than a pointer, encoded the way GLib encodes
+//! integer handles (`GSIZE_TO_POINTER`). Ids start at 1, so `NULL` is
+//! unambiguously "no mark"; on a 32-bit host the id space caps at 4
+//! billion rows in one session, which a chat scrollback will not reach.
+//! Nothing dereferences it, which is why a stale mark is inert rather
+//! than dangling.
 //!
-//! **Marks.** `chat_view.h`'s `HxChatMark *` is an opaque handle, and
-//! here it is a [`MessageId`] rather than a pointer, encoded the way
-//! GLib encodes integer handles (`GSIZE_TO_POINTER`). Ids start at 1, so
-//! `NULL` is unambiguously "no mark"; on a 32-bit host the id space caps
-//! at 4 billion rows in one session, which a chat scrollback will not
-//! reach. Nothing dereferences it — that is the entire point of the
-//! opaque type, and the reason a stale mark here is inert where xtext's
-//! raw `textentry *` would have dangled.
+//! **Widgets.** Every entry point takes a `GtkWidget *` the caller owns
+//! and wraps it with a plain reference ([`view_of`]); none of them may
+//! sink a floating reference, which is the easiest way to destroy a
+//! widget the caller still thinks it has.
 
-use crate::view::{HxChatView, PALETTE_COLS};
+use crate::view::{RotulusView, PALETTE_COLS};
 use gtk4::glib::translate::{IntoGlib, IntoGlibPtr, ToGlibPtr};
 use gtk4::prelude::*;
-use hxchat_layout::{Block, ColorRef, Message, MessageId, MessageKind, ParsedText, Style};
-use std::ffi::{c_char, c_int, c_void, CStr};
-use std::sync::atomic::{AtomicBool, Ordering};
+use rotulus_layout::{
+    Attrs, Block, ColorRef, LoadMoreDirection, Message, MessageFlags, MessageId, MessageKind,
+    ParsedText, Span, Style,
+};
+use std::ffi::{c_char, c_int, c_uint, c_void, CStr};
 
 type CGtkWidget = *mut gtk4::ffi::GtkWidget;
 
@@ -36,23 +35,22 @@ unsafe fn cstr(p: *const c_char) -> String {
 }
 
 /// # Safety
-/// `p` points to `len` readable bytes, or is NULL.
-unsafe fn cslice(p: *const c_char, len: c_int) -> String {
-    if p.is_null() || len <= 0 {
+/// `p` points to `len` readable bytes, or is NULL. A negative `len`
+/// means `p` is NUL-terminated.
+unsafe fn ctext(p: *const c_char, len: c_int) -> String {
+    if p.is_null() {
         return String::new();
+    }
+    if len < 0 {
+        return cstr(p);
     }
     let bytes = std::slice::from_raw_parts(p as *const u8, len as usize);
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// Resolve the `stamp` argument the way xtext does.
-///
-/// `gtk_xtext_append_entry` (xtext.c:5399) substitutes `time (0)` when
-/// the caller passes 0, and nearly every call site in `chat.c` / `msg.c`
-/// passes 0 for live messages precisely to get that. Passing the 0
-/// through would silently date every live message to the epoch — and
-/// since the timestamp column is what surfaces it, the visible symptom
-/// would be timestamps quietly disappearing on the new backend.
+/// A `stamp` of 0 means "now": nearly every live append passes 0 for
+/// exactly that, and dating those rows to the epoch would make their
+/// timestamps silently vanish.
 fn stamp_or_now(stamp: i64) -> i64 {
     if stamp != 0 {
         return stamp;
@@ -68,43 +66,27 @@ fn mark_to_ptr(id: MessageId) -> *mut c_void {
 }
 
 fn ptr_to_mark(p: *mut c_void) -> Option<MessageId> {
-    let v = p as usize as u64;
-    if v == 0 {
-        None
-    } else {
-        Some(MessageId(v))
+    match p as usize as u64 {
+        0 => None,
+        v => Some(MessageId(v)),
     }
 }
 
 /// Wrap a borrowed `GtkWidget *` from C, without disturbing its
 /// floating reference.
 ///
-/// **Not `from_glib_none`.** That is the obvious choice and it is wrong
-/// here, in a way that is worth spelling out because it cost a long
-/// debugging session. glib-rs implements `from_glib_none` for objects as
-/// `from_glib_full(g_object_ref_sink(ptr))` — its own source carries the
-/// warning "Attention: this takes ownership of floating references". Our
-/// widgets are handed to C *floating* with refcount 1 (see
-/// [`into_floating_ptr`]), because that is `gtk_xtext_new`'s contract
-/// and `chat.c` sinks it later. So `from_glib_none` sank the floating
-/// ref into the Rust wrapper, the wrapper dropped at the end of the
-/// call, refcount hit zero, and the widget was destroyed by the *first*
-/// FFI call made on it — `hx_chat_view_set_font`, one line after
-/// construction. Everything afterwards operated on freed memory:
-/// `gtk_widget_set_can_focus` failed `GTK_IS_WIDGET`, `is_hxchat` read a
-/// dead type and answered "no", and the call was dispatched into xtext,
-/// segfaulting in `gtk_xtext_set_time_stamp`.
-///
-/// `g_object_ref` + `from_glib_full` instead: a plain reference, which
-/// leaves the floating flag alone. The wrapper drops its own reference
-/// on scope exit and the object survives with the caller's floating
-/// reference intact. This is also the re-entrancy-safe "full" form in
-/// the sense of `docs/rust/glib-interop.md` — the object cannot be freed
-/// underneath us mid-call — so we keep that property too.
+/// **Not `from_glib_none`.** glib-rs implements that for objects as
+/// `from_glib_full(g_object_ref_sink(ptr))`, which sinks a floating
+/// reference into the wrapper. A view handed to C is floating, like any
+/// GTK constructor's result, so the wrapper would own it, drop at the end
+/// of the call, and destroy the widget on the first call made on it.
+/// `g_object_ref` + `from_glib_full` takes a plain reference instead,
+/// which also keeps the object alive for the whole call if a handler
+/// reached from it drops the caller's.
 ///
 /// # Safety
 /// `w` is NULL or a valid `GtkWidget *` owned by the caller.
-unsafe fn view_of(w: CGtkWidget) -> Option<HxChatView> {
+unsafe fn view_of(w: CGtkWidget) -> Option<RotulusView> {
     if w.is_null() {
         return None;
     }
@@ -112,7 +94,7 @@ unsafe fn view_of(w: CGtkWidget) -> Option<HxChatView> {
         gtk4::glib::gobject_ffi::g_object_ref(w as *mut gtk4::glib::gobject_ffi::GObject)
             as CGtkWidget,
     );
-    widget.downcast::<HxChatView>().ok()
+    widget.downcast::<RotulusView>().ok()
 }
 
 macro_rules! with_view {
@@ -124,448 +106,159 @@ macro_rules! with_view {
     }};
 }
 
-// ---- construction / configuration ---------------------------------
-
-/// # Safety
-/// `palette` points to `HX_CHAT_PAL_COLS` `GdkRGBA`s, or is NULL.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_new(
-    palette: *const gtk4::gdk::ffi::GdkRGBA,
-    separator: c_int,
-) -> CGtkWidget {
-    crate::ensure_gtk_init();
-    let view = HxChatView::new();
-    view.set_separator(separator != 0);
-    if !palette.is_null() {
-        let mut pal = [gtk4::gdk::RGBA::BLACK; PALETTE_COLS];
-        let src = std::slice::from_raw_parts(palette, PALETTE_COLS);
-        for (dst, s) in pal.iter_mut().zip(src.iter()) {
-            *dst = gtk4::gdk::RGBA::new(s.red, s.green, s.blue, s.alpha);
-        }
-        view.set_palette(&pal);
-    }
-    into_floating_ptr(view)
-}
-
-/// Hand a freshly-built widget to C with refcount 1 and *floating*.
+/// Hand a freshly-built widget to C with refcount 1 and *floating*, the
+/// way `g_object_new` returns a GTK widget.
 ///
-/// Same helper, same two lines, as `gtkhx-ui`'s `into_floating_ptr`
-/// (`chat.rs:71`, and three more call sites in `news.rs`, `emoji.rs`,
-/// `voice_panel.rs`). Worth spelling out why both halves are needed,
-/// because getting either wrong is a crash or a leak:
-///
-/// - `to_glib_none()` would hand back a *borrowed* pointer and then drop
-///   the wrapper at scope exit, taking the last reference with it. That
-///   was the C2 startup crash: C held freed memory, and the SIGSEGV
-///   landed in `gtk_xtext_set_font` because `is_hxchat` read the dead
-///   object's type, failed the check, and dispatched to the wrong
-///   backend.
-/// - `into_glib_ptr` alone transfers the reference but leaves the object
-///   non-floating, because gtk-rs sinks the floating ref when it wraps
-///   an `InitiallyUnowned`. `g_object_new` — and so `gtk_xtext_new` —
-///   returns refcount 1 *and* floating, and `chat.c:1789` does
-///   `g_object_ref_sink (text)` on the result. A non-floating ref there
-///   leaks instead of sinking.
-///
-/// `g_object_force_floating` restores the flag without touching the
-/// count, so the two backends are genuinely interchangeable.
+/// `into_glib_ptr` alone transfers the reference but leaves the object
+/// non-floating, because gtk-rs sinks the floating ref when it wraps an
+/// `InitiallyUnowned`; a caller that then `g_object_ref_sink`s it, as C
+/// callers do, would leak. `g_object_force_floating` restores the flag
+/// without touching the count.
 ///
 /// # Safety
 /// Caller takes ownership of the returned pointer.
 unsafe fn into_floating_ptr<W: IsA<gtk4::Widget>>(w: W) -> CGtkWidget {
     let ptr = w.upcast::<gtk4::Widget>().into_glib_ptr();
     gtk4::glib::gobject_ffi::g_object_force_floating(ptr as *mut gtk4::glib::gobject_ffi::GObject);
-    debug_assert!(
-        gtk4::glib::gobject_ffi::g_object_is_floating(ptr as *mut gtk4::glib::gobject_ffi::GObject)
-            != 0,
-        "a widget handed to C must be floating, like a GTK C constructor"
-    );
     ptr
 }
 
-/// # Safety
-/// See module docs; `w` is a valid `HxChatView *`.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_get_type() -> gtk4::glib::ffi::GType {
-    crate::ensure_gtk_init();
-    use gtk4::glib::prelude::StaticType;
-    HxChatView::static_type().into_glib()
-}
+// ---- types ----------------------------------------------------------
 
-/// # Safety
-/// `w` is a valid `HxChatView *`; `font` a NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_set_font(w: CGtkWidget, font: *const c_char) {
-    with_view!(w, v, {
-        let f = cstr(font);
-        if !f.is_empty() {
-            v.set_font_from_string(&f);
-        }
-    })
-}
-
-/// # Safety
-/// `palette` points to `HX_CHAT_PAL_COLS` `GdkRGBA`s.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_set_palette(
-    w: CGtkWidget,
-    palette: *const gtk4::gdk::ffi::GdkRGBA,
-) {
-    if palette.is_null() {
-        return;
-    }
-    with_view!(w, v, {
-        let mut pal = [gtk4::gdk::RGBA::BLACK; PALETTE_COLS];
-        let src = std::slice::from_raw_parts(palette, PALETTE_COLS);
-        for (dst, s) in pal.iter_mut().zip(src.iter()) {
-            *dst = gtk4::gdk::RGBA::new(s.red, s.green, s.blue, s.alpha);
-        }
-        v.set_palette(&pal);
-    })
-}
-
-/// # Safety
-/// `w` is a valid `HxChatView *`.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_set_word_wrap(w: CGtkWidget, on: c_int) {
-    with_view!(w, v, v.set_word_wrap(on != 0))
-}
-
-/// # Safety
-/// `w` is a valid `HxChatView *`.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_set_max_lines(w: CGtkWidget, n: c_int) {
-    with_view!(w, v, v.set_max_rows(n))
-}
-
-/// # Safety
-/// `w` is a valid `HxChatView *`.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_set_indent(w: CGtkWidget, on: c_int) {
-    with_view!(w, v, v.set_indent(on != 0))
-}
-
-/// # Safety
-/// `w` is a valid `HxChatView *`.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_set_max_indent(w: CGtkWidget, px: c_int) {
-    with_view!(w, v, v.set_max_indent(px))
-}
-
-/// # Safety
-/// `w` is a valid `HxChatView *`.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_set_time_stamp(w: CGtkWidget, on: c_int) {
-    with_view!(w, v, v.set_time_stamp(on != 0))
-}
-
-/// # Safety
-/// `w` is a valid `HxChatView *` or NULL; `fmt` a NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_set_stamp_format(w: CGtkWidget, fmt: *const c_char) {
-    let f = cstr(fmt);
-    // A NULL view means "format only", which `prefs_read` does before
-    // any window exists. Recording it process-wide is load-bearing: it
-    // is the *only* time the persisted pref is delivered, so dropping it
-    // would leave every view on the built-in default until the user
-    // happened to edit the setting again.
-    crate::view::prefs::STAMP_FORMAT.with(|slot| {
-        *slot.borrow_mut() = if f.is_empty() { None } else { Some(f.clone()) };
-    });
-    if !w.is_null() {
-        with_view!(w, v, v.set_stamp_format(&f))
-    }
-}
-
-/// The word classifier `chat_view.h` takes.
-///
-/// Typed rather than `*mut c_void` on purpose: casting a function
-/// pointer to a data pointer is undefined behaviour in C — the standard
-/// does not guarantee they are even the same width — so the dispatcher
-/// must be able to pass this through without an illegal cast. Matching
-/// the real signature on both sides is also what makes a link-time
-/// signature mismatch impossible.
-pub type UrlCheckFn = unsafe extern "C" fn(CGtkWidget, *mut c_char) -> c_int;
-
-/// # Safety
-/// `w` is a valid `HxChatView *`; `f` is NULL or a valid function pointer.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_set_urlcheck_function(w: CGtkWidget, f: Option<UrlCheckFn>) {
-    // C3: link activation is part of the interaction phase, and it will
-    // arrive as a typed `link-activated` signal rather than a
-    // word-classifier callback (scoping §3.6). Accepted and dropped so
-    // the dispatcher stays uniform — but accepted with its real type, so
-    // no caller has to launder it through void*.
-    let _ = (w, f);
-}
-
-/// # Safety
-/// `w` is a valid `HxChatView *`.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_get_vadjustment(
-    w: CGtkWidget,
-) -> *mut gtk4::ffi::GtkAdjustment {
-    match view_of(w) {
-        Some(v) => {
-            // Create one on demand if the view isn't in a
-            // GtkScrolledWindow — chat.c packs a bare GtkScrollbar and
-            // hands it this adjustment, exactly as it did with xtext.
-            let adj = match v.vadjustment() {
-                Some(a) => a,
-                None => {
-                    let a = gtk4::Adjustment::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-                    v.set_vadjustment(Some(&a));
-                    a
-                }
-            };
-            // Borrowed, matching xtext's `return xtext->adj;`. Safe
-            // because the view itself holds a reference in either branch
-            // above — in the None branch `set_vadjustment` stored one
-            // before the local wrapper drops — and the caller
-            // (`gtk_scrollbar_new`) takes its own.
-            adj.to_glib_none().0
-        }
-        None => std::ptr::null_mut(),
-    }
-}
-
-/// # Safety
-/// `w` is a valid `HxChatView *`.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_refresh(w: CGtkWidget) {
-    with_view!(w, v, v.queue_draw())
-}
-
-/// # Safety
-/// `w` is a valid `HxChatView *`.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_clear(w: CGtkWidget) {
-    with_view!(w, v, v.clear())
-}
-
-/// # Safety
-/// `w` is a valid `HxChatView *`.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_set_zoom_permille(w: CGtkWidget, zoom: c_int) {
-    with_view!(w, v, v.set_zoom_permille(zoom.max(0) as u32))
-}
-
-/// # Safety
-/// Process-wide; takes no view.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_set_autocopy_text(enabled: c_int) {
-    crate::view::prefs::AUTOCOPY_TEXT.with(|c| c.set(enabled != 0));
-}
-
-/// # Safety
-/// Process-wide; takes no view.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_set_autocopy_stamp(enabled: c_int) {
-    crate::view::prefs::AUTOCOPY_STAMP.with(|c| c.set(enabled != 0));
-}
-
-/// # Safety
-/// Process-wide; takes no view.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_set_autocopy_color(enabled: c_int) {
-    crate::view::prefs::AUTOCOPY_COLOR.with(|c| c.set(enabled != 0));
-}
-
-// ---- appending -----------------------------------------------------
-
-/// Build a message from the compat path's two mIRC strings.
-///
-/// The left column keeps its own styling via `Message::gutter` — see the
-/// field's docs for why a bare `Speaker { nick }` can't reproduce what
-/// `chat.c` emits.
-/// Build a row from two plain strings.
-///
-/// Plain, now: these used to run through `mirc::parse`, which decoded
-/// the in-band `\003NN` escape vocabulary. Nothing produces those any
-/// more — style arrives as runs (`hx_chat_view_append_runs`) — and
-/// continuing to *interpret* them here would be actively worse than
-/// useless, because the remaining callers pass text that came off the
-/// wire. A server could set colours in your chat log by sending the
-/// bytes. It cannot now: they are characters like any other.
-fn compat_message(left: &str, right: &str, stamp: i64) -> Message {
-    let gutter = if left.is_empty() {
-        None
-    } else {
-        Some(ParsedText::plain(left))
-    };
-    let mut body = ParsedText::plain(right);
-    crate::links::autolink(&mut body);
-    Message {
-        kind: MessageKind::Live,
-        timestamp: stamp_or_now(stamp),
-        speaker: None,
-        gutter,
-        blocks: vec![Block::Text(body)],
-        flags: hxchat_layout::MessageFlags::NONE,
-    }
-}
-
-/// # Safety
-/// `w` is a valid `HxChatView *` or NULL.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_set_avatar_size(w: CGtkWidget, px: c_int) {
-    with_view!(w, v, v.set_avatar_size(px.max(0) as u32));
-}
-
-/// # Safety
-/// `w` is a valid `HxChatView *` or NULL.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_set_group_gap(w: CGtkWidget, secs: c_int) {
-    with_view!(w, v, v.set_group_gap_secs(secs as i64));
-}
-
-// ---- styled runs (C6) ----------------------------------------------
-
-/// `HxChatRun` from `chat_view.h`. Layout is pinned by the assertion
-/// below; C builds these on the stack and we only read them.
+/// `RotulusRun`. C builds these on the stack and we only read them.
 #[repr(C)]
-pub struct HxChatRun {
-    pub(crate) text: *const c_char,
-    pub(crate) len: c_int,
-    pub(crate) color: i16,
-    pub(crate) attrs: u16,
+#[derive(Clone, Copy)]
+pub struct RotulusRun {
+    pub text: *const c_char,
+    pub len: c_int,
+    pub color: i16,
+    pub attrs: u16,
+    pub background: i16,
+    pub rgb: u32,
+    pub background_rgb: u32,
 }
 
-const HX_CHAT_COLOR_DEFAULT: i16 = -1;
+pub const ROTULUS_COLOR_DEFAULT: i16 = -1;
 
-/// `HxChatSpeaker` from `chat_view.h`.
+pub const ATTR_BOLD: u16 = 1 << 0;
+pub const ATTR_ITALIC: u16 = 1 << 1;
+pub const ATTR_UNDERLINE: u16 = 1 << 2;
+pub const ATTR_STRIKETHROUGH: u16 = 1 << 3;
+pub const ATTR_MONOSPACE: u16 = 1 << 4;
+pub const ATTR_REVERSE: u16 = 1 << 5;
+pub const ATTR_BACKGROUND: u16 = 1 << 8;
+pub const ATTR_RGB: u16 = 1 << 9;
+pub const ATTR_BACKGROUND_RGB: u16 = 1 << 10;
+
+/// `RotulusSpeaker`.
 #[repr(C)]
-pub struct HxChatSpeaker {
-    pub(crate) uid: u16,
-    pub(crate) nick: *const c_char,
-    pub(crate) nick_len: c_int,
-    pub(crate) outgoing: c_int,
+#[derive(Clone, Copy)]
+pub struct RotulusSpeaker {
+    pub key: u64,
+    pub nick: *const c_char,
+    pub nick_len: c_int,
 }
 
-impl HxChatSpeaker {
-    /// The `HX_CHAT_SPEAKER_NONE` of chat_view.h, for the entry points
-    /// that don't take one from C.
-    fn none() -> HxChatSpeaker {
-        HxChatSpeaker {
-            uid: 0,
-            nick: std::ptr::null(),
-            nick_len: -1,
-            outgoing: 0,
+/// `RotulusRowKind`.
+pub const ROW_MESSAGE: c_int = 0;
+pub const ROW_SYSTEM: c_int = 1;
+pub const ROW_HISTORY: c_int = 2;
+pub const ROW_DIVIDER: c_int = 3;
+pub const ROW_LOAD_OLDER: c_int = 4;
+pub const ROW_LOAD_NEWER: c_int = 5;
+
+pub const ROW_OUTGOING: c_uint = 1 << 0;
+pub const ROW_ACTION: c_uint = 1 << 1;
+
+/// `RotulusRow`.
+#[repr(C)]
+pub struct RotulusRow {
+    pub kind: c_int,
+    pub flags: c_uint,
+    pub stamp: i64,
+    pub speaker: RotulusSpeaker,
+    pub gutter: *const RotulusRun,
+    pub n_gutter: c_int,
+    pub body: *const RotulusRun,
+    pub n_body: c_int,
+}
+
+/// `RotulusFrame`.
+#[repr(C)]
+pub struct RotulusFrame {
+    pub texture: *mut gtk4::gdk::ffi::GdkTexture,
+    pub delay_ms: u32,
+}
+
+// ---- runs to text ---------------------------------------------------
+
+/// # Safety
+/// `p` points to `n` readable values, or is NULL.
+unsafe fn slice_of<'a, T>(p: *const T, n: c_int) -> &'a [T] {
+    if p.is_null() || n <= 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(p, n as usize)
+    }
+}
+
+/// The `Style` a run carries. One definition, so the uniformity test and
+/// the span builder cannot disagree about what "same style" means.
+pub(crate) fn run_style(r: &RotulusRun) -> Style {
+    let mut attrs = Attrs::NONE;
+    for (bit, a) in [
+        (ATTR_BOLD, Attrs::BOLD),
+        (ATTR_ITALIC, Attrs::ITALIC),
+        (ATTR_UNDERLINE, Attrs::UNDERLINE),
+        (ATTR_STRIKETHROUGH, Attrs::STRIKETHROUGH),
+        (ATTR_MONOSPACE, Attrs::CODE),
+        (ATTR_REVERSE, Attrs::REVERSE),
+    ] {
+        if r.attrs & bit != 0 {
+            attrs = attrs.union(a);
         }
     }
-}
-
-/// `None` when the caller couldn't identify the speaker.
-///
-/// uid 0 means "not known", not "user zero". Chat messages carry a UID
-/// chunk and the C side passes it straight through, but the chunk is
-/// optional — older servers omit it, and `parse_chat` defaults it to 0 —
-/// so the caller falls back to a nick lookup, which can itself miss.
-/// Guessing would attach the wrong avatar and group two people's
-/// messages together, so a miss stays a miss.
-pub(crate) unsafe fn speaker_of(s: &HxChatSpeaker) -> Option<hxchat_layout::Speaker> {
-    if s.uid == 0 {
-        return None;
-    }
-    // Length-delimited, not NUL-delimited: the chat paths pass a slice
-    // into the middle of the received line, so reading to the NUL would
-    // take the colon and the whole message body with it. -1 means the
-    // caller really does have a C string.
-    let nick = if s.nick.is_null() {
-        String::new()
-    } else if s.nick_len < 0 {
-        cstr(s.nick)
+    let fg = if r.attrs & ATTR_RGB != 0 {
+        ColorRef::Rgb(r.rgb & 0xff_ffff)
+    } else if r.color < 0 {
+        ColorRef::Default
     } else {
-        cslice(s.nick, s.nick_len)
+        ColorRef::Palette(r.color.min(255) as u8)
     };
-    Some(hxchat_layout::Speaker::new(s.uid, nick))
-}
-
-/// Mirror of chat_view.h's `HX_CHAT_ATTR_*`.
-fn attrs_from_c(bits: u16) -> hxchat_layout::Attrs {
-    let mut a = hxchat_layout::Attrs::NONE;
-    if bits & (1 << 0) != 0 {
-        a = a.union(hxchat_layout::Attrs::BOLD);
-    }
-    if bits & (1 << 1) != 0 {
-        a = a.union(hxchat_layout::Attrs::ITALIC);
-    }
-    if bits & (1 << 2) != 0 {
-        a = a.union(hxchat_layout::Attrs::UNDERLINE);
-    }
-    a
-}
-
-/// The `Style` a run carries. One definition, so the uniformity test
-/// and the span builder cannot disagree about what "same style" means.
-fn run_style(r: &HxChatRun) -> Style {
+    let bg = if r.attrs & ATTR_BACKGROUND_RGB != 0 {
+        ColorRef::Rgb(r.background_rgb & 0xff_ffff)
+    } else if r.attrs & ATTR_BACKGROUND != 0 && r.background >= 0 {
+        ColorRef::Palette(r.background.min(255) as u8)
+    } else {
+        ColorRef::Default
+    };
     Style {
-        fg: if r.color == HX_CHAT_COLOR_DEFAULT {
-            ColorRef::Default
-        } else {
-            ColorRef::Palette(r.color as u8)
-        },
-        attrs: attrs_from_c(r.attrs),
-        ..Style::default()
+        attrs,
+        fg,
+        bg,
+        link: None,
     }
 }
 
-/// Whether incoming text is parsed as markdown.
-///
-/// Process-wide rather than per-view, matching the autocopy prefs: it is
-/// one Settings checkbox and every chat surface should agree.
-///
-/// A `static` atomic and not a `thread_local!`, because "process-wide"
-/// has to be true of the storage and not just of the comment. With a
-/// thread-local, a setter called off the main thread would flip a flag
-/// nothing ever reads and the checkbox would appear not to work — a
-/// silent failure, since nothing about the call would report an error.
-static MARKDOWN: AtomicBool = AtomicBool::new(true);
-
-fn markdown_enabled() -> bool {
-    MARKDOWN.load(Ordering::Relaxed)
-}
-
-/// # Safety
-/// Callable from any thread. The flag is a plain atomic; a view already
-/// mid-parse on the main thread finishes with whichever value it read,
-/// and the next append sees the new one.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_set_markdown(on: c_int) {
-    MARKDOWN.store(on != 0, Ordering::Relaxed);
-}
-
-/// Build a `ParsedText` from a C run array.
+/// Join a run array into one `ParsedText`.
 ///
 /// # Safety
-/// `runs` points to `n` readable `HxChatRun`s, each with a valid
+/// `runs` points to `n` readable `RotulusRun`s, each with a valid
 /// `text`/`len` pair.
-pub(crate) unsafe fn runs_to_text(runs: *const HxChatRun, n: c_int) -> ParsedText {
+pub(crate) unsafe fn runs_to_text(runs: *const RotulusRun, n: c_int) -> ParsedText {
     let mut out = ParsedText::default();
-    if runs.is_null() || n <= 0 {
-        return out;
-    }
-    for i in 0..n as usize {
-        let r = &*runs.add(i);
-        // `len` is documented as "bytes, or -1 for strlen" — cslice
-        // treats anything <= 0 as empty, so a legitimately NUL-terminated
-        // run would have been silently dropped.
-        let text = if r.len < 0 {
-            cstr(r.text)
-        } else {
-            cslice(r.text, r.len)
-        };
+    for r in slice_of(runs, n) {
+        let text = ctext(r.text, r.len);
         if text.is_empty() {
             continue;
         }
         let start = out.text.len();
         out.text.push_str(&text);
         let style = run_style(r);
-        // Only record a span when it actually says something; a plain
-        // run is the absence of a span, which is what keeps an
-        // unstyled row's span list empty rather than one-per-run.
+        // A plain run is the absence of a span, which keeps an unstyled
+        // row's span list empty rather than one-per-run.
         if style != Style::default() {
-            out.spans.push(hxchat_layout::Span {
+            out.spans.push(Span {
                 range: start..out.text.len(),
                 style,
             });
@@ -574,143 +267,15 @@ pub(crate) unsafe fn runs_to_text(runs: *const HxChatRun, n: c_int) -> ParsedTex
     out
 }
 
-/// # Safety
-/// `gutter` / `body` point to their respective run counts, or are NULL.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_append_runs(
-    w: CGtkWidget,
-    speaker: HxChatSpeaker,
-    gutter: *const HxChatRun,
-    n_gutter: c_int,
-    body: *const HxChatRun,
-    n_body: c_int,
-    stamp: i64,
-) -> *mut c_void {
-    match view_of(w) {
-        Some(v) => mark_to_ptr(v.append(runs_message(
-            &speaker,
-            gutter,
-            n_gutter,
-            body,
-            n_body,
-            stamp,
-            runs_kind(gutter, n_gutter, body, n_body),
-        ))),
-        None => std::ptr::null_mut(),
-    }
-}
-
-/// Append a client-generated notice — a `[hx]` status line.
-///
-/// Identical to `hx_chat_view_append_runs` but for the message kind,
-/// which is what keeps these rows from grouping with each other. They
-/// share a gutter without sharing a speaker, so left as ordinary
-/// messages a run of them collapses under one tag.
-///
-/// # Safety
-/// As `hx_chat_view_append_runs`.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_append_system_runs(
-    w: CGtkWidget,
-    gutter: *const HxChatRun,
-    n_gutter: c_int,
-    body: *const HxChatRun,
-    n_body: c_int,
-    stamp: i64,
-) -> *mut c_void {
-    match view_of(w) {
-        Some(v) => mark_to_ptr(v.append(runs_message(
-            &HxChatSpeaker::none(),
-            gutter,
-            n_gutter,
-            body,
-            n_body,
-            stamp,
-            MessageKind::System,
-        ))),
-        None => std::ptr::null_mut(),
-    }
-}
-
-/// # Safety
-/// As `hx_chat_view_append_runs`; `anchor` is a mark or NULL.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_insert_runs_before(
-    w: CGtkWidget,
-    anchor: *mut c_void,
-    speaker: HxChatSpeaker,
-    gutter: *const HxChatRun,
-    n_gutter: c_int,
-    body: *const HxChatRun,
-    n_body: c_int,
-    stamp: i64,
-) -> *mut c_void {
-    match view_of(w) {
-        Some(v) => {
-            let msg = runs_message(
-                &speaker,
-                gutter,
-                n_gutter,
-                body,
-                n_body,
-                stamp,
-                runs_kind(gutter, n_gutter, body, n_body),
-            );
-            mark_to_ptr(v.insert_before(ptr_to_mark(anchor), msg))
-        }
-        None => std::ptr::null_mut(),
-    }
-}
-
-/// What a row of runs is: history when every run is drawn in the history
-/// palette slot, live otherwise.
-///
-/// `chat.c` draws every row of a chat-history block — entries, dividers,
-/// the "Load older" row — entirely in `HX_CHAT_PAL_HISTORY_MUTED`, and
-/// nothing else uses that slot, so this is how the view learns which rows
-/// are history without a second set of entry points. It matters to the
-/// scrollback cap, which history rows don't count against.
-///
-/// # Safety
-/// As `hx_chat_view_append_runs`.
-pub(crate) unsafe fn runs_kind(
-    gutter: *const HxChatRun,
-    n_gutter: c_int,
-    body: *const HxChatRun,
-    n_body: c_int,
-) -> MessageKind {
-    let runs = |p: *const HxChatRun, n: c_int| -> &[HxChatRun] {
-        if p.is_null() || n <= 0 {
-            &[]
-        } else {
-            std::slice::from_raw_parts(p, n as usize)
-        }
-    };
-    let (g, b) = (runs(gutter, n_gutter), runs(body, n_body));
-    let muted = |r: &HxChatRun| r.color as usize == crate::view::PAL_HISTORY_MUTED;
-    if !b.is_empty() && g.iter().chain(b).all(muted) {
-        MessageKind::History {
-            server_message_id: 0,
-        }
-    } else {
-        MessageKind::Live
-    }
-}
-
 /// The single style every body run shares, or `None` when they differ.
 ///
 /// Markdown is only applied to a *stylistically uniform* body. A body
-/// assembled from several differently-styled runs is chrome the caller
-/// styled deliberately — a divider, a `[hx]` status line — and
-/// re-parsing it would fight that. In practice every real body is one
-/// run: plain for live chat, muted for history.
-unsafe fn uniform_body_style(runs: *const HxChatRun, n: c_int) -> Option<Style> {
-    if runs.is_null() || n <= 0 {
-        return None;
-    }
+/// assembled from several differently-styled runs was styled by the
+/// caller on purpose — a divider, a status line, IRC formatting — and
+/// re-parsing it would fight that.
+unsafe fn uniform_style(runs: *const RotulusRun, n: c_int) -> Option<Style> {
     let mut seen: Option<Style> = None;
-    for i in 0..n as usize {
-        let r = &*runs.add(i);
+    for r in slice_of(runs, n) {
         let style = run_style(r);
         match seen {
             None => seen = Some(style),
@@ -724,10 +289,9 @@ unsafe fn uniform_body_style(runs: *const HxChatRun, n: c_int) -> Option<Style> 
 /// Lay `base` under `p`, so text the parser left unstyled still carries
 /// the caller's colour.
 ///
-/// Needed because the renderer treats a gap between spans as *default*
-/// style, not as "whatever the row's colour was". Without this a muted
-/// history line would come back with only its bold words muted and the
-/// rest at full contrast.
+/// The renderer treats a gap between spans as *default* style, not as
+/// "whatever the row's colour was", so without this a muted history line
+/// would come back with only its bold words muted.
 fn under(p: ParsedText, base: Style) -> ParsedText {
     if base == Style::default() {
         return p;
@@ -740,13 +304,13 @@ fn under(p: ParsedText, base: Style) -> ParsedText {
     let mut at = 0usize;
     for sp in p.spans {
         if sp.range.start > at {
-            out.spans.push(hxchat_layout::Span {
+            out.spans.push(Span {
                 range: at..sp.range.start,
                 style: base,
             });
         }
         at = sp.range.end;
-        out.spans.push(hxchat_layout::Span {
+        out.spans.push(Span {
             range: sp.range,
             style: Style {
                 fg: if sp.style.fg == ColorRef::Default {
@@ -754,13 +318,18 @@ fn under(p: ParsedText, base: Style) -> ParsedText {
                 } else {
                     sp.style.fg
                 },
+                bg: if sp.style.bg == ColorRef::Default {
+                    base.bg
+                } else {
+                    sp.style.bg
+                },
                 attrs: sp.style.attrs.union(base.attrs),
                 ..sp.style
             },
         });
     }
     if at < out.text.len() {
-        out.spans.push(hxchat_layout::Span {
+        out.spans.push(Span {
             range: at..out.text.len(),
             style: base,
         });
@@ -768,35 +337,42 @@ fn under(p: ParsedText, base: Style) -> ParsedText {
     out
 }
 
-/// Split a body into blocks, rendering markdown when it is enabled.
-pub(crate) unsafe fn body_blocks(runs: *const HxChatRun, n: c_int, markdown: bool) -> Vec<Block> {
+/// Split a body into blocks, rendering markdown when it is on.
+///
+/// # Safety
+/// As [`runs_to_text`].
+pub(crate) unsafe fn body_blocks(
+    runs: *const RotulusRun,
+    n: c_int,
+    markdown: bool,
+    links: &rotulus_layout::Linkifier,
+) -> Vec<Block> {
+    use rotulus_layout::markdown::{parse_inline_with, split_blocks, RawBlock};
     let plain = runs_to_text(runs, n);
 
-    let Some(base) = uniform_body_style(runs, n).filter(|_| markdown) else {
+    let Some(base) = uniform_style(runs, n).filter(|_| markdown) else {
         // Markdown off, or a body the caller styled run by run: keep it
         // exactly as handed over.
         let mut b = plain;
-        crate::links::autolink(&mut b);
+        crate::links::autolink(&mut b, links);
         return vec![Block::Text(b)];
     };
 
     let mut out = Vec::new();
-    for raw in hxchat_layout::markdown::split_blocks(&plain.text) {
+    for raw in split_blocks(&plain.text) {
         match raw {
-            hxchat_layout::markdown::RawBlock::Paragraph(t) => {
-                let mut p = under(hxchat_layout::markdown::parse_inline(&t), base);
-                crate::links::autolink(&mut p);
+            RawBlock::Paragraph(t) => {
+                let mut p = under(parse_inline_with(&t, links), base);
+                crate::links::autolink(&mut p, links);
                 out.push(Block::Text(p));
             }
             // Fenced code is inert by definition: no inline parsing, and
-            // deliberately no autolinking either — a URL inside a code
-            // fence is being shown, not offered.
-            hxchat_layout::markdown::RawBlock::Code { text, language } => {
-                out.push(Block::Code { text, language });
-            }
-            hxchat_layout::markdown::RawBlock::Quote { text, depth } => {
-                let mut p = under(hxchat_layout::markdown::parse_inline(&text), base);
-                crate::links::autolink(&mut p);
+            // no autolinking either — a URL inside a code fence is being
+            // shown, not offered.
+            RawBlock::Code { text, language } => out.push(Block::Code { text, language }),
+            RawBlock::Quote { text, depth } => {
+                let mut p = under(parse_inline_with(&text, links), base);
+                crate::links::autolink(&mut p, links);
                 out.push(Block::Quote { content: p, depth });
             }
         }
@@ -807,259 +383,526 @@ pub(crate) unsafe fn body_blocks(runs: *const HxChatRun, n: c_int, markdown: boo
     out
 }
 
-unsafe fn runs_message(
-    speaker: &HxChatSpeaker,
-    gutter: *const HxChatRun,
-    n_gutter: c_int,
-    body: *const HxChatRun,
-    n_body: c_int,
-    stamp: i64,
-    kind: MessageKind,
-) -> Message {
-    // The gutter is never markdown-parsed: a nick containing asterisks
-    // is a nick, not emphasis.
-    let g = runs_to_text(gutter, n_gutter);
-    let blocks = body_blocks(body, n_body, markdown_enabled());
-    Message {
-        kind,
-        timestamp: stamp_or_now(stamp),
-        speaker: speaker_of(speaker),
-        gutter: if g.text.is_empty() { None } else { Some(g) },
-        blocks,
-        flags: if speaker.outgoing != 0 {
-            hxchat_layout::MessageFlags::OUTGOING
-        } else {
-            hxchat_layout::MessageFlags::NONE
+/// `None` when the caller couldn't identify the speaker.
+///
+/// # Safety
+/// `s.nick` is NULL or valid for `s.nick_len` bytes (or NUL-terminated
+/// when it is negative).
+pub(crate) unsafe fn speaker_of(s: &RotulusSpeaker) -> Option<rotulus_layout::Speaker> {
+    if s.key == 0 {
+        return None;
+    }
+    // Length-delimited as well as NUL-delimited: a caller slicing the
+    // sender out of a received line hands over a pointer into the middle
+    // of it, and reading to the NUL would take the rest of the line.
+    Some(rotulus_layout::Speaker::new(
+        s.key,
+        ctext(s.nick, s.nick_len),
+    ))
+}
+
+fn row_kind(kind: c_int) -> MessageKind {
+    match kind {
+        ROW_SYSTEM => MessageKind::System,
+        ROW_HISTORY => MessageKind::History {
+            server_message_id: 0,
         },
+        ROW_DIVIDER => MessageKind::Divider,
+        ROW_LOAD_OLDER => MessageKind::LoadMore(LoadMoreDirection::Older),
+        ROW_LOAD_NEWER => MessageKind::LoadMore(LoadMoreDirection::Newer),
+        _ => MessageKind::Live,
     }
 }
 
+/// Build a message from a C row, under the view's own markdown and link
+/// settings.
+///
 /// # Safety
-/// `text` points to `len` readable bytes.
+/// `row` points to a valid `RotulusRow` whose run arrays are readable.
+pub(crate) unsafe fn row_message(view: &RotulusView, row: &RotulusRow) -> Message {
+    // The gutter is never markdown-parsed: a nick containing asterisks is
+    // a nick, not emphasis.
+    let gutter = runs_to_text(row.gutter, row.n_gutter);
+    let links = view.linkifier();
+    let blocks = body_blocks(row.body, row.n_body, view.markdown(), &links);
+    let mut flags = MessageFlags::NONE;
+    if row.flags & ROW_OUTGOING != 0 {
+        flags = flags.union(MessageFlags::OUTGOING);
+    }
+    if row.flags & ROW_ACTION != 0 {
+        flags = flags.union(MessageFlags::ACTION);
+    }
+    Message {
+        kind: row_kind(row.kind),
+        timestamp: stamp_or_now(row.stamp),
+        speaker: speaker_of(&row.speaker),
+        gutter: if gutter.text.is_empty() {
+            None
+        } else {
+            Some(gutter)
+        },
+        blocks: blocks.into(),
+        flags,
+    }
+}
+
+// ---- construction and configuration --------------------------------
+
 #[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_append(
+pub extern "C" fn rotulus_view_new() -> CGtkWidget {
+    crate::ensure_gtk_init();
+    unsafe { into_floating_ptr(RotulusView::new()) }
+}
+
+#[no_mangle]
+pub extern "C" fn rotulus_view_get_type() -> gtk4::glib::ffi::GType {
+    crate::ensure_gtk_init();
+    RotulusView::static_type().into_glib()
+}
+
+#[no_mangle]
+pub extern "C" fn rotulus_load_direction_get_type() -> gtk4::glib::ffi::GType {
+    crate::view::LoadDirection::static_type().into_glib()
+}
+
+/// # Safety
+/// `w` is a valid `RotulusView *`; `palette` points to `ROTULUS_PAL_COLS`
+/// `GdkRGBA`s, or is NULL.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_set_palette(
     w: CGtkWidget,
-    text: *const c_char,
-    len: c_int,
-    stamp: i64,
+    palette: *const gtk4::gdk::ffi::GdkRGBA,
 ) {
+    if palette.is_null() {
+        return;
+    }
     with_view!(w, v, {
-        let raw = cslice(text, len);
-        let mut body = ParsedText::plain(&raw);
-        crate::links::autolink(&mut body);
-        v.append(Message {
-            kind: MessageKind::Live,
-            timestamp: stamp_or_now(stamp),
-            speaker: None,
-            gutter: None,
-            blocks: vec![Block::Text(body)],
-            flags: hxchat_layout::MessageFlags::NONE,
-        });
+        let mut pal = [gtk4::gdk::RGBA::BLACK; PALETTE_COLS];
+        for (dst, s) in pal
+            .iter_mut()
+            .zip(std::slice::from_raw_parts(palette, PALETTE_COLS))
+        {
+            *dst = gtk4::gdk::RGBA::new(s.red, s.green, s.blue, s.alpha);
+        }
+        v.set_palette(&pal);
     })
 }
 
 /// # Safety
-/// `left` / `right` point to their respective readable byte counts.
+/// `w` is a valid `RotulusView *`; `font` is a NUL-terminated string.
 #[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_append_indent(
+pub unsafe extern "C" fn rotulus_view_set_font(w: CGtkWidget, font: *const c_char) {
+    with_view!(w, v, v.set_font_from_string(&cstr(font)))
+}
+
+macro_rules! bool_setter {
+    ($name:ident, $method:ident) => {
+        /// # Safety
+        /// `w` is a valid `RotulusView *`.
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(w: CGtkWidget, on: c_int) {
+            with_view!(w, v, v.$method(on != 0))
+        }
+    };
+}
+
+bool_setter!(rotulus_view_set_word_wrap, set_word_wrap);
+bool_setter!(rotulus_view_set_indent, set_indent);
+bool_setter!(rotulus_view_set_separator, set_separator);
+bool_setter!(rotulus_view_set_show_timestamps, set_time_stamp);
+bool_setter!(rotulus_view_set_markdown, set_markdown);
+bool_setter!(rotulus_view_set_autocopy, set_autocopy);
+bool_setter!(rotulus_view_set_copy_timestamps, set_copy_timestamps);
+bool_setter!(rotulus_view_set_activate_links, set_activate_links);
+
+/// # Safety
+/// `w` is a valid `RotulusView *`.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_set_max_lines(w: CGtkWidget, n: c_int) {
+    with_view!(w, v, v.set_max_rows(n))
+}
+
+/// # Safety
+/// `w` is a valid `RotulusView *`.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_set_max_indent(w: CGtkWidget, px: c_int) {
+    with_view!(w, v, v.set_max_indent(px))
+}
+
+/// # Safety
+/// `w` is a valid `RotulusView *`; `fmt` is NULL or NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_set_timestamp_format(w: CGtkWidget, fmt: *const c_char) {
+    with_view!(w, v, v.set_stamp_format(&cstr(fmt)))
+}
+
+/// # Safety
+/// `w` is a valid `RotulusView *`.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_set_avatar_size(w: CGtkWidget, px: c_int) {
+    with_view!(w, v, v.set_avatar_size(px.max(0) as u32))
+}
+
+/// # Safety
+/// `w` is a valid `RotulusView *`.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_set_group_gap(w: CGtkWidget, secs: c_int) {
+    with_view!(w, v, v.set_group_gap_secs(i64::from(secs)))
+}
+
+/// # Safety
+/// `w` is a valid `RotulusView *`.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_set_zoom(w: CGtkWidget, zoom: f64) {
+    with_view!(
+        w,
+        v,
+        v.set_zoom_permille((zoom.clamp(0.1, 10.0) * 1000.0).round() as u32)
+    )
+}
+
+/// # Safety
+/// `w` is a valid `RotulusView *`; `schemes` is NULL or a NULL-terminated
+/// array of NUL-terminated strings.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_set_link_schemes(
     w: CGtkWidget,
-    left: *const c_char,
-    left_len: c_int,
-    right: *const c_char,
-    right_len: c_int,
-    stamp: i64,
-) -> *mut c_void {
+    schemes: *const *const c_char,
+) {
+    let mut list = Vec::new();
+    if !schemes.is_null() {
+        let mut p = schemes;
+        while !(*p).is_null() {
+            list.push(cstr(*p));
+            p = p.add(1);
+        }
+    }
+    with_view!(w, v, {
+        let refs: Vec<&str> = list.iter().map(String::as_str).collect();
+        v.set_link_schemes(&refs);
+    })
+}
+
+/// `RotulusAvatarFunc`.
+pub type AvatarFuncC =
+    unsafe extern "C" fn(CGtkWidget, u64, *mut c_void) -> *mut gtk4::gdk::ffi::GdkPaintable;
+
+/// The C side of an avatar function: its pointer, its data, and what to
+/// call when the view lets go of both.
+struct CAvatar {
+    func: AvatarFuncC,
+    data: *mut c_void,
+    destroy: Option<unsafe extern "C" fn(*mut c_void)>,
+}
+
+impl Drop for CAvatar {
+    fn drop(&mut self) {
+        if let Some(d) = self.destroy {
+            unsafe { d(self.data) };
+        }
+    }
+}
+
+/// # Safety
+/// `w` is a valid `RotulusView *`; `func` is NULL or a valid function
+/// pointer, called with `data` until the view is destroyed or the
+/// function is replaced, when `destroy` (if any) is called on `data`.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_set_avatar_func(
+    w: CGtkWidget,
+    func: Option<AvatarFuncC>,
+    data: *mut c_void,
+    destroy: Option<unsafe extern "C" fn(*mut c_void)>,
+) {
+    let Some(v) = view_of(w) else {
+        if let Some(d) = destroy {
+            d(data);
+        }
+        return;
+    };
+    let Some(func) = func else {
+        if let Some(d) = destroy {
+            d(data);
+        }
+        v.set_avatar_func(None);
+        return;
+    };
+    let c = CAvatar {
+        func,
+        data,
+        destroy,
+    };
+    v.set_avatar_func(Some(Box::new(move |view: &RotulusView, key| {
+        let p = (c.func)(
+            view.upcast_ref::<gtk4::Widget>().to_glib_none().0,
+            key,
+            c.data,
+        );
+        if p.is_null() {
+            None
+        } else {
+            // Borrowed, per the contract: take our own reference.
+            Some(gtk4::glib::translate::from_glib_none(p))
+        }
+    })));
+}
+
+/// # Safety
+/// `w` is a valid `RotulusView *`.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_get_vadjustment(
+    w: CGtkWidget,
+) -> *mut gtk4::ffi::GtkAdjustment {
     match view_of(w) {
         Some(v) => {
-            let l = cslice(left, left_len);
-            let r = cslice(right, right_len);
-            mark_to_ptr(v.append(compat_message(&l, &r, stamp)))
+            // Created on demand when the view isn't in a GtkScrolledWindow,
+            // for a bare GtkScrollbar packed beside it.
+            let adj = match v.vadjustment() {
+                Some(a) => a,
+                None => {
+                    let a = gtk4::Adjustment::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+                    v.set_vadjustment(Some(&a));
+                    a
+                }
+            };
+            // Borrowed: the view holds a reference in either branch, and a
+            // caller that keeps it (gtk_scrollbar_new) takes its own.
+            adj.to_glib_none().0
         }
         None => std::ptr::null_mut(),
     }
 }
 
+// ---- content --------------------------------------------------------
+
 /// # Safety
-/// `left` / `right` point to their respective readable byte counts.
+/// `w` is a valid `RotulusView *`; `row` points to a valid `RotulusRow`.
 #[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_insert_before(
+pub unsafe extern "C" fn rotulus_view_append(w: CGtkWidget, row: *const RotulusRow) -> *mut c_void {
+    match (view_of(w), row.as_ref()) {
+        (Some(v), Some(row)) => mark_to_ptr(v.append(row_message(&v, row))),
+        _ => std::ptr::null_mut(),
+    }
+}
+
+/// # Safety
+/// As [`rotulus_view_append`]; `anchor` is a mark or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_insert_before(
     w: CGtkWidget,
     anchor: *mut c_void,
-    left: *const c_char,
-    left_len: c_int,
-    right: *const c_char,
-    right_len: c_int,
-    stamp: i64,
+    row: *const RotulusRow,
 ) -> *mut c_void {
-    match view_of(w) {
-        Some(v) => {
-            let l = cslice(left, left_len);
-            let r = cslice(right, right_len);
-            mark_to_ptr(v.insert_before(ptr_to_mark(anchor), compat_message(&l, &r, stamp)))
+    match (view_of(w), row.as_ref()) {
+        (Some(v), Some(row)) => {
+            let msg = row_message(&v, row);
+            mark_to_ptr(v.insert_before(ptr_to_mark(anchor), msg))
         }
-        None => std::ptr::null_mut(),
+        _ => std::ptr::null_mut(),
     }
 }
 
 /// # Safety
-/// `w` is a valid `HxChatView *`.
+/// As [`rotulus_view_append`]; `mark` is a mark or NULL.
 #[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_remove(w: CGtkWidget, mark: *mut c_void) -> c_int {
+pub unsafe extern "C" fn rotulus_view_replace(
+    w: CGtkWidget,
+    mark: *mut c_void,
+    row: *const RotulusRow,
+) -> c_int {
+    match (view_of(w), ptr_to_mark(mark), row.as_ref()) {
+        (Some(v), Some(id), Some(row)) => {
+            let msg = row_message(&v, row);
+            c_int::from(v.replace(id, msg))
+        }
+        _ => 0,
+    }
+}
+
+/// # Safety
+/// `w` is a valid `RotulusView *`; `mark` is a mark or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_remove(w: CGtkWidget, mark: *mut c_void) -> c_int {
     match (view_of(w), ptr_to_mark(mark)) {
         (Some(v), Some(id)) => c_int::from(v.remove(id)),
         _ => 0,
     }
 }
 
-// ---- inline media (C4) ---------------------------------------------
-
 /// # Safety
-/// `alt` is a NUL-terminated string.
+/// `w` is a valid `RotulusView *`; `text` points to `len` readable bytes,
+/// or is NUL-terminated when `len` is negative.
 #[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_append_media(
+pub unsafe extern "C" fn rotulus_view_append_text(
     w: CGtkWidget,
-    texture: *mut c_void,
-    alt: *const c_char,
-    token: u32,
+    text: *const c_char,
+    len: c_int,
     stamp: i64,
-) {
-    with_view!(w, v, {
-        // Append the row *first*.
-        //
-        // `set_media_frames` attaches the decoded size by looking the
-        // row up with `find_image(token)`, so installing frames before
-        // the row exists finds nothing, leaves `Block::Image.size` at
-        // None, and the snapshot path — which requires `Some` — renders
-        // the placeholder forever. Usually the texture arrives later via
-        // set_texture and the order is moot; it is the pre-decoded case
-        // that breaks.
-        let alt = cstr(alt);
-        v.append(Message {
-            kind: MessageKind::Live,
-            timestamp: stamp_or_now(stamp),
-            speaker: None,
-            gutter: None,
-            blocks: vec![Block::Image {
-                token,
-                size: None,
-                alt,
-            }],
-            flags: hxchat_layout::MessageFlags::NONE,
-        });
-        if !texture.is_null() {
-            let tex: gtk4::gdk::Texture =
-                gtk4::glib::translate::from_glib_none(texture as *mut gtk4::gdk::ffi::GdkTexture);
-            v.set_media_frames(token, vec![(tex, 0)]);
-        }
-    })
-}
-
-/// # Safety
-/// `w` is a valid `HxChatView *`.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_media_mark(w: CGtkWidget, token: u32) -> *mut c_void {
-    match view_of(w) {
-        Some(v) => v
-            .find_image(token)
-            .map_or(std::ptr::null_mut(), mark_to_ptr),
-        None => std::ptr::null_mut(),
-    }
-}
-
-/// # Safety
-/// `w` is a valid `HxChatView *`.
-#[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_media_set_texture(
-    w: CGtkWidget,
-    mark: *mut c_void,
-    texture: *mut c_void,
-) {
-    let Some(v) = view_of(w) else { return };
-    let Some(token) = token_for_mark(&v, mark) else {
-        return;
+) -> *mut c_void {
+    let run = RotulusRun {
+        text,
+        len,
+        color: ROTULUS_COLOR_DEFAULT,
+        attrs: 0,
+        background: 0,
+        rgb: 0,
+        background_rgb: 0,
     };
-    if texture.is_null() {
-        // NULL reverts the row to its placeholder — the decode-failed
-        // path, which xtext also supports.
-        v.set_media_frames(token, Vec::new());
-        return;
-    }
-    let tex: gtk4::gdk::Texture =
-        gtk4::glib::translate::from_glib_none(texture as *mut gtk4::gdk::ffi::GdkTexture);
-    v.set_media_frames(token, vec![(tex, 0)]);
+    let row = RotulusRow {
+        kind: ROW_MESSAGE,
+        flags: 0,
+        stamp,
+        speaker: RotulusSpeaker {
+            key: 0,
+            nick: std::ptr::null(),
+            nick_len: -1,
+        },
+        gutter: std::ptr::null(),
+        n_gutter: 0,
+        body: &run,
+        n_body: 1,
+    };
+    rotulus_view_append(w, &row)
 }
 
-/// One animation frame, matching `HxInlineMediaFrame`
-/// (src/inline_media_decode.h): a strong `GdkTexture *` owned by the
-/// GArray, and the milliseconds to show it for.
-#[repr(C)]
-struct HxInlineMediaFrame {
+/// # Safety
+/// `w` is a valid `RotulusView *`.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_clear(w: CGtkWidget) {
+    with_view!(w, v, v.clear())
+}
+
+/// # Safety
+/// `w` is a valid `RotulusView *`.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_get_last(w: CGtkWidget) -> *mut c_void {
+    with_view!(w, v, v.last().map_or(std::ptr::null_mut(), mark_to_ptr))
+}
+
+/// # Safety
+/// `w` is a valid `RotulusView *`; `mark` is a mark or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_set_marker(w: CGtkWidget, mark: *mut c_void) {
+    with_view!(w, v, v.set_marker(ptr_to_mark(mark)))
+}
+
+// ---- inline media ---------------------------------------------------
+
+/// # Safety
+/// `w` is a valid `RotulusView *`; `texture` is NULL or a `GdkTexture *`;
+/// `alt` is NULL or NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_append_media(
+    w: CGtkWidget,
     texture: *mut gtk4::gdk::ffi::GdkTexture,
-    delay_ms: u32,
-}
-
-/// The token carried by the image block a mark names.
-unsafe fn token_for_mark(v: &HxChatView, mark: *mut c_void) -> Option<u32> {
-    let id = ptr_to_mark(mark)?;
-    v.image_token_of(id)
+    alt: *const c_char,
+    token: c_uint,
+    stamp: i64,
+) -> *mut c_void {
+    let Some(v) = view_of(w) else {
+        return std::ptr::null_mut();
+    };
+    // Append the row *first*: installing frames attaches the decoded size
+    // by finding the row with the token, so frames installed before the
+    // row exists find nothing, and the row shows its alt text forever.
+    let id = v.append(Message {
+        kind: MessageKind::Live,
+        timestamp: stamp_or_now(stamp),
+        speaker: None,
+        gutter: None,
+        blocks: vec![Block::Image {
+            token,
+            size: None,
+            alt: cstr(alt),
+        }]
+        .into(),
+        flags: MessageFlags::NONE,
+    });
+    if !texture.is_null() {
+        let tex: gtk4::gdk::Texture = gtk4::glib::translate::from_glib_none(texture);
+        v.set_media_frames(token, vec![(tex, 0)]);
+    }
+    mark_to_ptr(id)
 }
 
 /// # Safety
-/// `w` is a valid `HxChatView *`.
+/// `w` is a valid `RotulusView *`.
 #[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_media_set_animation(
+pub unsafe extern "C" fn rotulus_view_media_mark(w: CGtkWidget, token: c_uint) -> *mut c_void {
+    with_view!(
+        w,
+        v,
+        v.find_image(token)
+            .map_or(std::ptr::null_mut(), mark_to_ptr)
+    )
+}
+
+/// # Safety
+/// `w` is a valid `RotulusView *`; `texture` is NULL or a `GdkTexture *`.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_media_set_texture(
     w: CGtkWidget,
     mark: *mut c_void,
-    frames: *mut c_void,
+    texture: *mut gtk4::gdk::ffi::GdkTexture,
 ) {
     let Some(v) = view_of(w) else { return };
-    let Some(token) = token_for_mark(&v, mark) else {
+    let Some(token) = ptr_to_mark(mark).and_then(|id| v.image_token_of(id)) else {
         return;
     };
-    if frames.is_null() {
-        v.set_media_frames(token, Vec::new());
+    let frames = if texture.is_null() {
+        Vec::new()
+    } else {
+        vec![(gtk4::glib::translate::from_glib_none(texture), 0)]
+    };
+    v.set_media_frames(token, frames);
+}
+
+/// # Safety
+/// `w` is a valid `RotulusView *`; `frames` points to `n` readable
+/// `RotulusFrame`s, or is NULL.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_media_set_frames(
+    w: CGtkWidget,
+    mark: *mut c_void,
+    frames: *const RotulusFrame,
+    n: c_uint,
+) {
+    let Some(v) = view_of(w) else { return };
+    let Some(token) = ptr_to_mark(mark).and_then(|id| v.image_token_of(id)) else {
         return;
-    }
-    let arr = frames as *mut gtk4::glib::ffi::GArray;
-    let len = (*arr).len as usize;
-    let data = (*arr).data as *const HxInlineMediaFrame;
-    let mut out = Vec::with_capacity(len);
-    for i in 0..len {
-        let f = &*data.add(i);
-        if f.texture.is_null() {
-            continue;
-        }
-        // from_glib_none: the GArray owns these refs and drops them in
-        // its clear_func, so we take our own rather than stealing them.
-        let tex: gtk4::gdk::Texture = gtk4::glib::translate::from_glib_none(f.texture);
-        out.push((tex, f.delay_ms));
-    }
+    };
+    let out = slice_of(frames, n.min(c_int::MAX as c_uint) as c_int)
+        .iter()
+        .filter(|f| !f.texture.is_null())
+        // from_glib_none: the caller keeps its references; we take ours.
+        .map(|f| (gtk4::glib::translate::from_glib_none(f.texture), f.delay_ms))
+        .collect();
     v.set_media_frames(token, out);
 }
 
-// ---- in-buffer search ---------------------------------------------
+// ---- search ---------------------------------------------------------
 
-/// Write the `(total, ordinal)` readout back through the out-params,
-/// either of which may be NULL.
-unsafe fn put_readout(n_matches: *mut u32, current: *mut u32, r: (usize, usize)) {
-    if !n_matches.is_null() {
-        *n_matches = r.0 as u32;
+/// Write the `(total, ordinal)` readout through the out-params, either of
+/// which may be NULL.
+unsafe fn put_readout(n_matches: *mut c_uint, current: *mut c_uint, r: (usize, usize)) {
+    if let Some(n) = n_matches.as_mut() {
+        *n = r.0 as c_uint;
     }
-    if !current.is_null() {
-        *current = r.1 as u32;
+    if let Some(c) = current.as_mut() {
+        *c = r.1 as c_uint;
     }
 }
 
 /// # Safety
-/// `needle` is a NUL-terminated string or NULL; the out-params are
-/// writable `guint`s or NULL.
+/// `w` is a valid `RotulusView *`; `needle` is NULL or NUL-terminated;
+/// the out-params are writable or NULL.
 #[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_search(
+pub unsafe extern "C" fn rotulus_view_search(
     w: CGtkWidget,
     needle: *const c_char,
     case_sensitive: c_int,
-    n_matches: *mut u32,
-    current: *mut u32,
+    n_matches: *mut c_uint,
+    current: *mut c_uint,
 ) {
     let needle = cstr(needle);
     let r = with_view!(w, v, v.search_set(&needle, case_sensitive != 0));
@@ -1067,26 +910,21 @@ pub unsafe extern "C" fn hx_chat_view_search(
 }
 
 /// # Safety
-/// The out-params are writable `guint`s or NULL.
+/// `w` is a valid `RotulusView *`; the out-params are writable or NULL.
 #[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_search_step(
+pub unsafe extern "C" fn rotulus_view_search_step(
     w: CGtkWidget,
     dir: c_int,
-    n_matches: *mut u32,
-    current: *mut u32,
+    n_matches: *mut c_uint,
+    current: *mut c_uint,
 ) {
     let r = with_view!(w, v, v.search_step(dir));
     put_readout(n_matches, current, r);
 }
 
 /// # Safety
-/// `w` is an `HxChatView` or NULL.
+/// `w` is a valid `RotulusView *`.
 #[no_mangle]
-pub unsafe extern "C" fn hx_chat_view_search_clear(w: CGtkWidget) {
-    with_view!(w, v, v.search_clear());
+pub unsafe extern "C" fn rotulus_view_search_clear(w: CGtkWidget) {
+    with_view!(w, v, v.search_clear())
 }
-
-/// Unused today; keeps `ParsedText` reachable for the C4 work without a
-/// dead-import warning in the meantime.
-#[allow(dead_code)]
-fn _keep(_: ParsedText) {}
