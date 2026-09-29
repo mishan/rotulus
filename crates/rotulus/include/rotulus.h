@@ -1,437 +1,355 @@
-/* GtkHx — chat view: the C-facing declaration of the chat output widget
+/* Rotulus — a GTK4 scrollback view for text-stream chat
  *
- * Copyright (C) 2000-2003 Misha Nasledov
+ * Copyright (C) 2026 Misha Nasledov <misha@nasledov.com>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
+ * This library is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as
+ * published by the Free Software Foundation; either version 2.1 of the
+ * License, or (at your option) any later version.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * This library is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
  */
 
 /*
- * The chat output surface. Every chat / private-chat / private-message
- * window renders through this header.
+ * RotulusView is a GtkWidget that shows a long, fast-growing stream of
+ * chat messages. Everything here is implemented in Rust; this header
+ * declares the C ABI it exports.
  *
- * There is exactly one implementation and it is Rust: the symbols below
- * are exported from `rust/crates/hxchat-view/src/ffi.rs`, and C links
- * against them directly. This file is a *declaration* header, not a
- * forwarding layer — there is no chat_view.c.
+ * Rows are structured, never text with codes in it. The application
+ * hands over a row kind, a speaker, and styled runs for the nick column
+ * and the body; the view never parses escape codes, so nothing a remote
+ * user sends can restyle the transcript.
  *
- * It was one, from C0 to C5. The dispatcher existed so the new backend
- * could coexist with the vendored xtext widget behind a runtime switch
- * while it was brought to parity; with xtext deleted it had one branch
- * left and became pure indirection, so it went too. The seam did its
- * job: by the end, xtext was referenced from that one file and nowhere
- * else in the tree, which is what made deleting 6,721 lines a
- * mechanical change rather than an archaeology project.
+ * Configuration is GObject properties ("font", "word-wrap", "max-lines",
+ * "indent", "max-indent", "separator", "show-timestamps",
+ * "timestamp-format", "avatar-size", "group-gap", "markdown",
+ * "link-schemes", "autocopy", "copy-timestamps", "activate-links", "zoom", and the
+ * read-only "has-selection"). The setters below are conveniences over
+ * them; g_object_set works equally well.
  *
- * What the seam bought, and what is worth not giving back:
+ * Signals:
  *
- *   1. No struct-field access. chat.c / msg.c / options.c once wrote
- *      GTK_XTEXT(w)->wordwrap, ->max_lines, ->urlcheck_function and read
- *      ->buffer and ->adj. Everything goes through hx_chat_view_set_* /
- *      _get_* calls, so the implementation owes callers behaviour rather
- *      than layout.
+ *   gboolean link-activated    (view, const char *href)
+ *       A primary click on a link, when "activate-links" is on. Return
+ *       TRUE to say it was handled; otherwise the view opens it with the
+ *       desktop's handler.
+ *   gboolean link-menu         (view, const char *href, double x, double y)
+ *       A secondary or middle click on a link, in widget coordinates.
+ *       Return TRUE to say it was handled; otherwise the view pops its
+ *       own Open / Copy menu.
+ *   void speaker-activated     (view, guint64 key)
+ *   void speaker-menu          (view, guint64 key, double x, double y)
+ *       A primary or secondary click on a speaker's nick or avatar.
+ *   void load-more             (view, RotulusLoadDirection direction)
+ *       A click on a ROTULUS_ROW_LOAD_OLDER / _NEWER row.
+ *   void media-activated       (view, guint token)
+ *       A primary click on an inline image or its placeholder.
+ *   void selection-changed     (view)
  *
- *   2. No raw entry pointers. The chat-history render cursors in
- *      struct hx_chat_history_render used to be live textentry* into
- *      xtext's internal linked list. They are opaque HxChatMark handles,
- *      which the Rust side backs with a message id — so a stale one is
- *      inert rather than dangling.
- *
- * Marks stay valid until the row they name is removed — explicitly via
- * hx_chat_view_remove, or implicitly by the scrollback trim
- * (hx_chat_view_set_max_lines) or a clear. Treat them as weak
- * references: hx_chat_view_remove on a stale mark is a safe no-op
- * returning FALSE, and that is the intended way to find out. Do not hold
- * a mark across a clear.
- *
- * Still xtext-shaped, and known to be: the "word_click" signal and its
- * urlcheck-function companion. A click yields a whitespace-delimited
- * word and callers demux by string prefix. Replacing them with typed
- * signals is a semantic change to three C handlers, not a mechanical
- * one — see docs/chat-view.md "Typed interaction signals".
+ * Marks are opaque handles to rows. They stay valid until the row they
+ * name goes — removed, trimmed by "max-lines", or cleared — and are
+ * weak: using a stale one is a safe no-op, and rotulus_view_remove
+ * returning FALSE is the intended way to find out.
  */
 
-#ifndef GTKHX_CHAT_VIEW_H
-#define GTKHX_CHAT_VIEW_H
+#ifndef ROTULUS_H
+#define ROTULUS_H
 
 #include <gtk/gtk.h>
-#include <time.h>
 
 G_BEGIN_DECLS
 
-/* ---- palette vocabulary ------------------------------------------ *
+#define ROTULUS_TYPE_VIEW (rotulus_view_get_type ())
+GType rotulus_view_get_type (void);
+
+typedef enum {
+    ROTULUS_LOAD_OLDER,
+    ROTULUS_LOAD_NEWER,
+} RotulusLoadDirection;
+
+#define ROTULUS_TYPE_LOAD_DIRECTION (rotulus_load_direction_get_type ())
+GType rotulus_load_direction_get_type (void);
+
+/* ---- palette ------------------------------------------------------ *
  *
- * Slots 0..31 are the mIRC colour indices addressed by an in-band
- * "\003NN" escape. Slots 32..37 are UI roles the GtkhxTheme palette
- * fills (see gtkhx_theme.h's matching GTKHX_PAL_* enum and
- * chat.c::gtkhx_apply_theme_palette).
+ * A view draws from a palette of ROTULUS_PAL_COLS colors. Slots 0..31
+ * are the legacy mIRC colors, so IRC formatting can address them by
+ * number. The rest are roles.
  *
- * Worth being precise about, because the tree has claimed otherwise in
- * a few comments: the mIRC slots are NOT protocol-shaped. The Hotline
- * wire format has no text-styling concept at all — no colour field, no
- * style field, chat / message / news bodies are plain text. The escape
- * vocabulary arrived with the XChat xtext fork in 2000 and every
- * "\003NN" byte in a GtkHx buffer was written by GtkHx itself (nick
- * brackets, highlight, the info prefix, history-muted rows, media
- * placeholders). Servers never send them, and hxproto's
- * strip_ansi would fold most of them anyway. Hotline's actual per-user
- * colour is a separate u32 RGB attribute on the user record, not
- * in-band markup.
+ * A role slot holding a fully transparent color means "follow the
+ * system": text takes the widget's CSS color, and the background is
+ * left to CSS. A new view starts with the mIRC colors and every role
+ * following the system, apart from the selection, the muted and
+ * timestamp text, the marker, and the per-nick colors, which have
+ * defaults of their own.
  *
- * That makes the whole vocabulary ours to retire — see
- * docs/chat-view.md "The retired mIRC escape vocabulary".
+ * Keep each one a plain number: the crate's tests parse them. */
+#define ROTULUS_PAL_MIRC_COLS 32
+#define ROTULUS_PAL_MARK_FG 32        /* selection foreground */
+#define ROTULUS_PAL_MARK_BG 33        /* selection background */
+#define ROTULUS_PAL_FG 34             /* default text foreground */
+#define ROTULUS_PAL_BG 35             /* default text background */
+#define ROTULUS_PAL_MARKER 36         /* last-read marker line */
+#define ROTULUS_PAL_MUTED 37          /* secondary text: history, captions */
+#define ROTULUS_PAL_TIMESTAMP 38      /* timestamp column */
+#define ROTULUS_PAL_NICK 39           /* other people's nicks */
+#define ROTULUS_PAL_SELF_NICK 40      /* your own nick */
+#define ROTULUS_PAL_NICK_BRACKET 41   /* < > around other people's nicks */
+#define ROTULUS_PAL_SELF_BRACKET 42   /* < > around your own nick */
+#define ROTULUS_PAL_SYSTEM 43         /* the tag of a status line */
+#define ROTULUS_PAL_SYSTEM_BRACKET 44 /* the brackets around it */
+#define ROTULUS_PAL_HIGHLIGHT 45      /* nick on a line that mentions you */
+#define ROTULUS_PAL_RULE 46           /* the column divider */
+#define ROTULUS_PAL_NICK_COLOR0 47    /* first of the per-nick colors */
+#define ROTULUS_PAL_NICK_COLORS 8     /* how many per-nick slots follow */
+#define ROTULUS_PAL_COLS 55           /* 32 mIRC + roles + nick colors */
+
+/* ---- runs --------------------------------------------------------- *
  *
- * This is now the sole definition. It used to mirror xtext.h's XTEXT_*
- * constants, with G_STATIC_ASSERTs in chat_view.c checking the two
- * agreed; both are gone with xtext. hxchat-view's tests read these
- * defines out of this file and hold its PALETTE_COLS and PAL_* constants
- * to them (palette_constants_match_chat_view_h), so the agreement is
- * still checked — just from the other end. Keep each one a plain
- * number: the test parses them. */
-#define HX_CHAT_PAL_MIRC_COLS 32
-#define HX_CHAT_PAL_MARK_FG 32        /* selection foreground */
-#define HX_CHAT_PAL_MARK_BG 33        /* selection background */
-#define HX_CHAT_PAL_FG 34             /* default text foreground */
-#define HX_CHAT_PAL_BG 35             /* default text background */
-#define HX_CHAT_PAL_MARKER 36         /* marker line */
-#define HX_CHAT_PAL_HISTORY_MUTED 37  /* rendered chat-history secondary text */
-#define HX_CHAT_PAL_TIMESTAMP 38      /* timestamp column */
-#define HX_CHAT_PAL_NICK 39           /* other people's nicks */
-#define HX_CHAT_PAL_SELF_NICK 40      /* your own nick */
-#define HX_CHAT_PAL_NICK_BRACKET 41   /* < > around other people's nicks */
-#define HX_CHAT_PAL_SELF_BRACKET 42   /* < > around your own nick */
-#define HX_CHAT_PAL_SYSTEM 43         /* the tag of a "[hx]" status line */
-#define HX_CHAT_PAL_SYSTEM_BRACKET 44 /* the [ ] around it */
-#define HX_CHAT_PAL_HIGHLIGHT 45      /* nick on a line that mentions you */
-#define HX_CHAT_PAL_RULE 46           /* the column divider */
-#define HX_CHAT_PAL_NICK_COLOR0 47    /* first of the per-nick colors */
-#define HX_CHAT_PAL_NICK_COLORS 8     /* how many per-nick slots follow */
-#define HX_CHAT_PAL_COLS 55           /* 32 mIRC + UI roles + nick colors */
-
-/* A UI-role slot holding a fully transparent color means "follow the
- * system": the view draws text in its own CSS color (libadwaita's view
- * foreground) and leaves the background to CSS. That is what a theme
- * that sets no chat fg/bg gets. */
-
-/* ---- marks -------------------------------------------------------- *
- *
- * An opaque handle to one appended row. Never dereferenced by callers;
- * the incomplete type makes that a compile error rather than a
- * convention. */
-typedef struct _HxChatMark HxChatMark;
-
-/* ---- construction / configuration --------------------------------- */
-
-/* Create a chat output view seeded with `palette` (HX_CHAT_PAL_COLS
- * entries). `separator` draws the indent-column separator line. */
-GtkWidget *hx_chat_view_new (const GdkRGBA palette[], gboolean separator);
-
-void hx_chat_view_set_font (GtkWidget *view, const char *font);
-void hx_chat_view_set_palette (GtkWidget *view, const GdkRGBA palette[]);
-void hx_chat_view_set_word_wrap (GtkWidget *view, gboolean word_wrap);
-void hx_chat_view_set_max_lines (GtkWidget *view, int max_lines);
-/* Two-column layout: a left gutter (timestamp) + nick column, with the
- * body indented past it. The gutter grows to fit the widest nick seen,
- * capped by hx_chat_view_set_max_indent. */
-void hx_chat_view_set_indent (GtkWidget *view, gboolean indent);
-void hx_chat_view_set_max_indent (GtkWidget *view, int max_indent_px);
-void hx_chat_view_set_time_stamp (GtkWidget *view, gboolean time_stamp);
-/* strftime(3) format for the per-line timestamp column. NULL or empty
- * `format` restores the built-in default; the implementation copies the
- * string. The format is process-wide, so a NULL `view` is legal and
- * means "set the format, skip the per-view column-width recompute" —
- * which is what prefs_read needs, since it runs before any chat window
- * exists. */
-void hx_chat_view_set_stamp_format (GtkWidget *view, const char *format);
-/* Classifier that the view calls to decide whether a word under the
- * pointer is a link (drives the hand cursor and the word_click
- * routing). */
-void hx_chat_view_set_urlcheck_function (
-    GtkWidget *view, int (*urlcheck_function) (GtkWidget *view, char *word));
-
-/* The vertical scroll adjustment, for wiring up a GtkScrollbar. */
-GtkAdjustment *hx_chat_view_get_vadjustment (GtkWidget *view);
-
-/* Force a full re-render (after a palette, font or pref change). */
-void hx_chat_view_refresh (GtkWidget *view);
-/* Drop every row. Invalidates every outstanding mark. */
-void hx_chat_view_clear (GtkWidget *view);
-
-/* Drag-end auto-clipboard behaviour. Process-wide, not per-view —
- * these mirror three boolean settings.
- *   text  — copy to the clipboard on drag-end at all
- *   stamp — include the per-line timestamp in the copied text
- *   color — retain in-band colour codes in the copied text */
-void hx_chat_view_set_autocopy_text (gboolean enabled);
-void hx_chat_view_set_autocopy_stamp (gboolean enabled);
-void hx_chat_view_set_autocopy_color (gboolean enabled);
-
-/* ---- styled runs (C6) --------------------------------------------- *
- *
- * A run is a slice of text with a colour and some attributes. A row is
- * built from an array of them: the gutter (nick column) is one array,
- * the body another.
- *
- * This replaces the in-band "\003NN" escape vocabulary that C0–C5 used
- * to get style from chat.c to the view. The escapes came from the XChat
- * xtext fork in 2000 and were never protocol — Hotline chat is plain
- * text — so they were GtkHx talking to itself in a format neither end
- * needed. The reason to be rid of them is not tidiness: two sites
- * (chat.c's info-prefix branch, msg.c's broadcast prefix) used to
- * *re-parse GtkHx's own escape output* to find where a name ended,
- * because the structure had been flattened into presentation and the
- * only way to get it back was to read it out again. Runs keep the
- * structure, so nothing has to reconstruct it.
- *
+ * A run is a slice of text with a color and attributes. A row is built
+ * from an array of them for the nick column and another for the body.
  * Runs are borrowed for the duration of the call; the view copies what
- * it needs. Build them on the stack.
- */
+ * it needs, so build them on the stack.
+ *
+ * The first four fields are all most callers set (ROTULUS_RUN); the rest
+ * take effect only when the matching attribute bit says so. */
 
-/* Palette index for a run: 0..31 mIRC-legacy slots, 32..37 UI roles
- * (see the HX_CHAT_PAL_* block above), or DEFAULT for the theme's
- * normal foreground. */
-#define HX_CHAT_COLOR_DEFAULT (-1)
+#define ROTULUS_COLOR_DEFAULT (-1)
 
-/* Named palette slots the chat code actually reaches for. These were
- * bare numbers inside printf format strings ("\00310[", "\003" "37"),
- * which is how a colour choice ends up undocumented and unsearchable.
- * They point at theme roles now, not at mIRC indices, so a theme's
- * palette reaches the gutter. */
-#define HX_CHAT_INFO_COLOR HX_CHAT_PAL_SYSTEM /* "[hx]" */
-#define HX_CHAT_INFO_BRACKET_COLOR HX_CHAT_PAL_SYSTEM_BRACKET
-#define HX_CHAT_HIGHLIGHT_COLOR HX_CHAT_PAL_HIGHLIGHT
-#define HX_CHAT_PLACEHOLDER_COLOR HX_CHAT_PAL_HISTORY_MUTED /* media alt text */
-
-#define HX_CHAT_ATTR_NONE 0u
-#define HX_CHAT_ATTR_BOLD (1u << 0)
-#define HX_CHAT_ATTR_ITALIC (1u << 1)
-#define HX_CHAT_ATTR_UNDERLINE (1u << 2)
+#define ROTULUS_ATTR_NONE 0u
+#define ROTULUS_ATTR_BOLD (1u << 0)
+#define ROTULUS_ATTR_ITALIC (1u << 1)
+#define ROTULUS_ATTR_UNDERLINE (1u << 2)
+#define ROTULUS_ATTR_STRIKETHROUGH (1u << 3)
+#define ROTULUS_ATTR_MONOSPACE (1u << 4)
+/* Swap the foreground and background. */
+#define ROTULUS_ATTR_REVERSE (1u << 5)
+/* `background` holds a palette index for the run's background. */
+#define ROTULUS_ATTR_BACKGROUND (1u << 8)
+/* `rgb` is the foreground, 0xRRGGBB, instead of `color`. */
+#define ROTULUS_ATTR_RGB (1u << 9)
+/* `background_rgb` is the background, 0xRRGGBB. */
+#define ROTULUS_ATTR_BACKGROUND_RGB (1u << 10)
 
 typedef struct {
     const char *text;
     int len;       /* bytes, or -1 for strlen */
-    gint16 color;  /* palette index, or HX_CHAT_COLOR_DEFAULT */
-    guint16 attrs; /* HX_CHAT_ATTR_* bits */
-} HxChatRun;
+    gint16 color;  /* palette index, or ROTULUS_COLOR_DEFAULT */
+    guint16 attrs; /* ROTULUS_ATTR_* bits */
+    gint16 background;
+    guint32 rgb;
+    guint32 background_rgb;
+} RotulusRun;
 
-/* Convenience for the common "one unstyled run" case. */
-#define HX_CHAT_RUN_PLAIN(t, l)                                                \
-    ((HxChatRun){ (t), (l), HX_CHAT_COLOR_DEFAULT, HX_CHAT_ATTR_NONE })
+/* A run with the four common fields; the rest are zero. Designated,
+ * so -Wmissing-field-initializers has nothing to say about them. */
+#define ROTULUS_RUN(t, l, c, a)                                                \
+    ((RotulusRun){ .text = (t), .len = (l), .color = (c), .attrs = (a) })
+
+/* The common "one unstyled run" case. */
+#define ROTULUS_RUN_PLAIN(t, l)                                                \
+    ROTULUS_RUN ((t), (l), ROTULUS_COLOR_DEFAULT, ROTULUS_ATTR_NONE)
+
+/* ---- rows --------------------------------------------------------- */
+
+typedef enum {
+    /* A message someone sent. */
+    ROTULUS_ROW_MESSAGE,
+    /* A notice the application generated: never groups with its
+     * neighbours, even when they share a tag. */
+    ROTULUS_ROW_SYSTEM,
+    /* A message loaded from history. Doesn't count against
+     * "max-lines", and is never trimmed to make room for live rows. */
+    ROTULUS_ROW_HISTORY,
+    /* A rule with a caption, framing a block of history. */
+    ROTULUS_ROW_DIVIDER,
+    /* A row that pages when clicked; see the load-more signal. */
+    ROTULUS_ROW_LOAD_OLDER,
+    ROTULUS_ROW_LOAD_NEWER,
+} RotulusRowKind;
+
+/* The row originated here rather than arriving from elsewhere. It
+ * breaks grouping independently of who the speaker is: in a
+ * conversation with yourself, both halves have the same speaker, and
+ * only direction tells your echo from the copy that came back. */
+#define ROTULUS_ROW_OUTGOING (1u << 0)
+/* A "/me" action: never groups. */
+#define ROTULUS_ROW_ACTION (1u << 1)
 
 /* Who said it.
  *
- * `uid` is the Hotline user id, 0 when unknown — which is the honest
- * answer more often than it looks: Hotline chat is a *text stream*, so
- * a chat line carries a name and no id, and the uid has to be looked up
- * against the conversation's membership model by nick. That lookup can
- * miss (the user left, two users share a name, the line is server
- * prose), and a wrong uid is worse than none: it would attach the wrong
- * avatar and group two people's messages together.
- *
- * This is the identity the user list uses, not a parallel one — see
- * hx_member_model_find_by_name in chat_members.h. One user, one record,
- * whichever surface you clicked. */
+ * `key` is the application's identity for the person, or 0 when it has
+ * none. The view only compares it, hands it back in the speaker signals,
+ * and passes it to the avatar function. A wrong key is worse than none:
+ * it attaches the wrong avatar and groups two people's messages. */
 typedef struct {
-    guint16 uid;      /* 0 = unknown */
+    guint64 key;
     const char *nick; /* borrowed for the call; may be NULL */
-    /* Length of `nick` in bytes, or -1 when it is NUL-terminated.
-     *
-     * Explicit because the chat paths hand over a slice *into the middle
-     * of the received line* — the sender's name is bytes
-     * [sender_off, sender_off+sender_len) of "misha:  hello". Reading
-     * that as a C string would swallow the colon, the body, and
-     * everything after it. */
-    int nick_len;
-    /* Direction: did this row originate here, or arrive from the
-     * server? It breaks message grouping independently of identity.
-     *
-     * Not the same question as "is the sender me". In a private-message
-     * window with yourself, *both* halves have you as the sender, so
-     * sender-identity cannot separate the echo of what you typed from
-     * the copy the server sent back — and grouping then collapses the
-     * whole exchange into one block, losing the alternation that is the
-     * content. Direction can separate them, because it is a property of
-     * which code path produced the row.
-     *
-     * In public chat there is one row per message, so this coincides
-     * with is_self; the distinction only bites in PMs. */
-    gboolean outgoing;
-} HxChatSpeaker;
+    int nick_len;     /* bytes, or -1 when NUL-terminated */
+} RotulusSpeaker;
 
-#define HX_CHAT_SPEAKER_NONE ((HxChatSpeaker){ 0, NULL, -1, FALSE })
+#define ROTULUS_SPEAKER_NONE ((RotulusSpeaker){ 0, NULL, -1 })
 
-/* Append a row built from runs. `gutter` may be NULL/0 for a row with
- * no nick column; `speaker` names who said it (HX_CHAT_SPEAKER_NONE for
- * system lines). Returns a mark naming the appended row. */
-HxChatMark *hx_chat_view_append_runs (GtkWidget *view, HxChatSpeaker speaker,
-                                      const HxChatRun *gutter, int n_gutter,
-                                      const HxChatRun *body, int n_body,
-                                      time_t stamp);
+typedef struct {
+    RotulusRowKind kind;
+    guint flags; /* ROTULUS_ROW_OUTGOING, ROTULUS_ROW_ACTION */
+    gint64 stamp; /* Unix seconds for the timestamp column; 0 is now */
+    RotulusSpeaker speaker;
+    const RotulusRun *gutter; /* the nick column; NULL for none */
+    int n_gutter;
+    const RotulusRun *body;
+    int n_body;
+} RotulusRow;
 
-/* Append a client-generated notice — a "[hx]" status line.
+typedef struct _RotulusMark RotulusMark;
+
+/* ---- construction and configuration ------------------------------- */
+
+GtkWidget *rotulus_view_new (void);
+
+/* `palette` holds ROTULUS_PAL_COLS colors. */
+void rotulus_view_set_palette (GtkWidget *view, const GdkRGBA palette[]);
+
+void rotulus_view_set_font (GtkWidget *view, const char *font);
+void rotulus_view_set_word_wrap (GtkWidget *view, gboolean word_wrap);
+/* Rows kept before the oldest are dropped; 0 keeps everything. */
+void rotulus_view_set_max_lines (GtkWidget *view, int max_lines);
+/* Two columns: timestamps and nicks in a column of their own, bodies
+ * indented past it. Off, a row is one column, with the nick at the
+ * start of the body's first line. */
+void rotulus_view_set_indent (GtkWidget *view, gboolean indent);
+void rotulus_view_set_max_indent (GtkWidget *view, int max_indent_px);
+void rotulus_view_set_separator (GtkWidget *view, gboolean separator);
+void rotulus_view_set_show_timestamps (GtkWidget *view, gboolean show);
+/* strftime(3); NULL or "" restores the default, "[%H:%M:%S] ". */
+void rotulus_view_set_timestamp_format (GtkWidget *view, const char *format);
+/* Edge of the avatar beside a speaker, in px; 0 hides avatars. Only the
+ * first row of a group draws one. */
+void rotulus_view_set_avatar_size (GtkWidget *view, int px);
+#define ROTULUS_AVATAR_SIZE_DEFAULT 32
+/* Seconds between one speaker's messages that start a new group; 0
+ * turns grouping off. */
+void rotulus_view_set_group_gap (GtkWidget *view, int secs);
+#define ROTULUS_GROUP_GAP_DEFAULT 300
+/* Render markdown in bodies appended from now on: **bold**, *italic*,
+ * `code`, fenced code blocks, > quotes, and [label](url) links to the
+ * view's link schemes. Rows already appended keep their rendering. */
+void rotulus_view_set_markdown (GtkWidget *view, gboolean markdown);
+/* The URL scheme prefixes that become links, NULL-terminated:
+ * { "https://", "mailto:", NULL }. NULL restores the default set. */
+void rotulus_view_set_link_schemes (GtkWidget *view,
+                                    const char *const *schemes);
+/* Copy to the clipboards when a drag-select ends. */
+void rotulus_view_set_autocopy (GtkWidget *view, gboolean autocopy);
+/* Prefix each copied row with its timestamp. */
+void rotulus_view_set_copy_timestamps (GtkWidget *view, gboolean copy);
+/* Open a link on a primary click (the default). Off, a primary click on a
+ * link does nothing special; the link menu works either way. */
+void rotulus_view_set_activate_links (GtkWidget *view, gboolean activate);
+/* Text scale, where 1.0 is the font's own size. */
+void rotulus_view_set_zoom (GtkWidget *view, double zoom);
+
+/* Resolves a speaker's key to the image in their avatar slot. Called on
+ * every draw, so an animated avatar animates; cache anything expensive.
+ * The result is borrowed until the draw finishes. The function must not
+ * change the view. */
+typedef GdkPaintable *(*RotulusAvatarFunc) (GtkWidget *view, guint64 key,
+                                            gpointer user_data);
+void rotulus_view_set_avatar_func (GtkWidget *view, RotulusAvatarFunc func,
+                                   gpointer user_data, GDestroyNotify destroy);
+
+/* The vertical adjustment, for a GtkScrollbar beside the view. The view
+ * is also a GtkScrollable, so a GtkScrolledWindow works too. */
+GtkAdjustment *rotulus_view_get_vadjustment (GtkWidget *view);
+
+/* ---- content ------------------------------------------------------ */
+
+RotulusMark *rotulus_view_append (GtkWidget *view, const RotulusRow *row);
+
+/* Insert immediately before `anchor`; NULL inserts at the top. What is
+ * on screen stays where it is, so backfilling history doesn't move what
+ * the user is reading. Insert rows in chronological order: each lands
+ * directly before the anchor. */
+RotulusMark *rotulus_view_insert_before (GtkWidget *view, RotulusMark *anchor,
+                                         const RotulusRow *row);
+
+/* Swap the content of the row `mark` names, keeping its place and the
+ * mark: an edit, a redaction, a streamed reply growing. FALSE if the
+ * row is gone. */
+gboolean rotulus_view_replace (GtkWidget *view, RotulusMark *mark,
+                               const RotulusRow *row);
+
+/* FALSE if the row was already gone, which is not an error. */
+gboolean rotulus_view_remove (GtkWidget *view, RotulusMark *mark);
+
+/* A plain row with no nick column. */
+RotulusMark *rotulus_view_append_text (GtkWidget *view, const char *text,
+                                       int len, gint64 stamp);
+
+/* Drop every row. Every mark goes stale. */
+void rotulus_view_clear (GtkWidget *view);
+
+/* The newest row, or NULL when the view is empty. */
+RotulusMark *rotulus_view_get_last (GtkWidget *view);
+
+/* Draw the last-read marker under the row `mark` names; NULL removes
+ * it. The marker goes with its row rather than moving to a neighbour. */
+void rotulus_view_set_marker (GtkWidget *view, RotulusMark *mark);
+
+/* ---- inline media ------------------------------------------------- *
  *
- * Same shape as hx_chat_view_append_runs minus the speaker, but the row
- * is marked as a *system* message, which is what stops a run of them
- * grouping together. Status lines share a gutter without sharing a
- * speaker, so as ordinary messages "connecting" / "connected" /
- * "login ok" collapse under a single [hx] tag and read as one event. */
-HxChatMark *hx_chat_view_append_system_runs (GtkWidget *view,
-                                             const HxChatRun *gutter,
-                                             int n_gutter,
-                                             const HxChatRun *body, int n_body,
-                                             time_t stamp);
+ * A media row shows `alt` as text until an image arrives, then the
+ * image. `token` identifies it to the application: media-activated
+ * reports it, and rotulus_view_media_mark finds the row by it, which is
+ * what an asynchronous decode should hold — the row may be trimmed
+ * while it runs. */
 
-/* As above, but inserted immediately BEFORE `anchor` (NULL prepends at
- * the head). Scroll position is preserved across the insert — see
- * hx_chat_view_insert_before below for the reasoning. */
-HxChatMark *
-hx_chat_view_insert_runs_before (GtkWidget *view, HxChatMark *anchor,
-                                 HxChatSpeaker speaker, const HxChatRun *gutter,
-                                 int n_gutter, const HxChatRun *body,
-                                 int n_body, time_t stamp);
+typedef struct {
+    GdkTexture *texture;
+    guint32 delay_ms; /* how long this frame shows */
+} RotulusFrame;
 
-/* Render markdown in incoming messages: `**bold**`, `*italic*`,
- * `` `code` ``, fenced code blocks, `>` quotes, and `[label](url)` with
- * a scheme allowlist.
- *
- * Process-wide, not per-view — it is one Settings checkbox and every
- * chat surface should agree. Affects messages appended *after* the call;
- * rows already in a buffer keep the rendering they were built with,
- * since re-parsing scrollback would mean holding the original source
- * text for every row forever.
- *
- * The send side is unaffected either way: markdown goes out literally,
- * because the Hotline wire format has no styling concept at all. */
-void hx_chat_view_set_markdown (gboolean enabled);
-
-/* Show the speaker's avatar in the gutter, `px` on a side; 0 hides it.
- *
- * Only the first message of a run carries one — repeating an icon down
- * a burst of messages is exactly the noise grouping exists to remove.
- * Continuation rows still *reserve* the width, so a run forming does not
- * shift the column.
- *
- * The icon is resolved per frame from the uid (see chat_avatar.h), so
- * animated avatars animate. Rows whose speaker is unknown (uid 0) get no
- * slot at all — there would be nothing to look up. */
-void hx_chat_view_set_avatar_size (GtkWidget *view, int px);
-
-/* Default avatar edge, in px. */
-#define HX_CHAT_AVATAR_SIZE_DEFAULT 32
-
-/* Coalesce consecutive messages from one speaker: only the first of a
- * run draws the nick column (and, once avatars land, the icon). `secs`
- * is how long a gap breaks a run; 0 turns grouping off.
- *
- * The body keeps its indent either way, and a hidden gutter still
- * reserves its width, so switching this does not shift the column. */
-void hx_chat_view_set_group_gap (GtkWidget *view, int secs);
-
-/* Default gap, in seconds. Five minutes: short enough that a burst of
- * messages collapses under one name, long enough that coming back to a
- * room shows who is talking rather than attaching your message to
- * something you said an hour ago. */
-#define HX_CHAT_GROUP_GAP_DEFAULT 300
-
-/* ---- appending (plain text) --------------------------------------- *
- *
- * `stamp` is a time_t for the row's timestamp column; 0 means "now".
- * Text is plain: no escape vocabulary, no styling. Use the run API
- * above when a row needs colour or attributes. */
-
-/* Append a plain row with no nick column (server prose, continuation
- * lines of a multi-line message). */
-void hx_chat_view_append (GtkWidget *view, const char *text, int len,
-                          time_t stamp);
-
-/* Append a two-column row: `left` in the nick column, `right` as the
- * body. Returns a mark naming the appended row. */
-HxChatMark *hx_chat_view_append_indent (GtkWidget *view, const char *left,
-                                        int left_len, const char *right,
-                                        int right_len, time_t stamp);
-
-/* Insert a two-column row immediately BEFORE `anchor`. A NULL anchor
- * prepends at the head. Returns a mark naming the inserted row.
- *
- * The scroll position is preserved across the insert: if the new row
- * lands above the viewport the view compensates, so backfilling older
- * content (the chat-history Load-Older path) doesn't move what the
- * user is reading. Call once per row in chronological order — each
- * insert lands directly before the anchor, so the last row inserted
- * ends up closest to it. */
-HxChatMark *hx_chat_view_insert_before (GtkWidget *view, HxChatMark *anchor,
-                                        const char *left, int left_len,
-                                        const char *right, int right_len,
-                                        time_t stamp);
-
-/* Remove the row `mark` names. Returns TRUE if it was found and
- * removed, FALSE if the mark was already stale (trimmed or cleared) —
- * which is not an error. The caller should drop the mark either way. */
-gboolean hx_chat_view_remove (GtkWidget *view, HxChatMark *mark);
-
-/* ---- inline media -------------------------------------------------- *
- *
- * A media row renders `alt_text` as ordinary styled text until a
- * texture lands, then paints the image in its place. `media_token` is
- * the per-conversation token the click handler uses to route back to
- * the conversation's media table; pass 0 for an untracked row. */
-void hx_chat_view_append_media (GtkWidget *view, GdkTexture *texture,
-                                const char *alt_text, guint media_token,
-                                time_t stamp);
-
-/* Look a media row up by its token. Returns NULL if the row is gone
- * (trimmed or cleared mid-fetch) — which is why the async decode path
- * holds a token rather than a mark. */
-HxChatMark *hx_chat_view_media_mark (GtkWidget *view, guint media_token);
-
-/* Swap in (or, with NULL, clear back to alt text) the texture on a
- * media row. */
-void hx_chat_view_media_set_texture (GtkWidget *view, HxChatMark *mark,
+RotulusMark *rotulus_view_append_media (GtkWidget *view, GdkTexture *texture,
+                                        const char *alt, guint token,
+                                        gint64 stamp);
+RotulusMark *rotulus_view_media_mark (GtkWidget *view, guint token);
+/* NULL reverts the row to its alt text. */
+void rotulus_view_media_set_texture (GtkWidget *view, RotulusMark *mark,
                                      GdkTexture *texture);
+/* An animation. The view takes its own references; n_frames 0 reverts
+ * the row to its alt text. */
+void rotulus_view_media_set_frames (GtkWidget *view, RotulusMark *mark,
+                                    const RotulusFrame *frames,
+                                    guint n_frames);
 
-/* Install an animation on a media row. `frames` is a GArray of
- * HxInlineMediaFrame (see inline_media_decode.h); the view takes a ref
- * and drives the per-frame tick. NULL or empty clears the animation. */
-void hx_chat_view_media_set_animation (GtkWidget *view, HxChatMark *mark,
-                                       GArray *frames);
+/* ---- search ------------------------------------------------------- *
+ *
+ * `n_matches` and `current` are out-parameters for a find bar's
+ * readout; `current` is 1-based, 0 when nothing is current. Either may
+ * be NULL. */
 
-/* ---- in-buffer search ----------------------------------------------- *
- *
- * Drives hxchat-layout's search engine. The old `hx_chat_view_can_search`
- * predicate is gone with xtext: it existed only so the find bar could
- * hide itself on a backend that couldn't search, and there is no such
- * backend now.
- *
- * (xtext did carry a `gtk_xtext_search` — a GRegex engine plus a
- * `search_found` list threaded through the entry chain — that nothing in
- * GtkHx ever called. It arrived with the HexChat vendoring and never ran
- * under GTK 4. It was deleted unexercised.)
- *
- * Run `needle` over the whole scrollback and select the first hit at or
- * below the viewport. An empty or NULL needle clears the search.
- *
- * `n_matches` and `current` are out-parameters for the find bar's
- * readout; `current` is 1-based, or 0 when nothing is current. Either
- * may be NULL. */
-void hx_chat_view_search (GtkWidget *view, const char *needle,
+/* Select the first match at or below the viewport. NULL or "" clears. */
+void rotulus_view_search (GtkWidget *view, const char *needle,
                           gboolean case_sensitive, guint *n_matches,
                           guint *current);
-
-/* Step to the next (dir > 0) or previous (dir < 0) match, wrapping at
- * both ends, and scroll it into view. */
-void hx_chat_view_search_step (GtkWidget *view, int dir, guint *n_matches,
+/* Step forward (dir > 0) or back (dir < 0), wrapping. */
+void rotulus_view_search_step (GtkWidget *view, int dir, guint *n_matches,
                                guint *current);
+void rotulus_view_search_clear (GtkWidget *view);
 
-/* Drop the query and its highlights. */
-void hx_chat_view_search_clear (GtkWidget *view);
+/* ---- IRC formatting ----------------------------------------------- *
+ *
+ * Split text carrying mIRC formatting codes (bold, italic, underline,
+ * strikethrough, monospace, reverse, reset, and colors by number or
+ * hex) into runs, with the codes removed. The runs point into `text`,
+ * which must outlive them. Free the array with g_free. Colors 0..15
+ * address the palette's mIRC slots; the extended colors and hex colors
+ * are RGB. */
+RotulusRun *rotulus_mirc_parse (const char *text, int len, int *n_runs);
 
 G_END_DECLS
 
-#endif /* GTKHX_CHAT_VIEW_H */
+#endif /* ROTULUS_H */

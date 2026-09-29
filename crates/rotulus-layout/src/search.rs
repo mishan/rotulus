@@ -1,14 +1,11 @@
 //! In-buffer search: find every occurrence of a needle, and a cursor
 //! over the results.
 //!
-//! This is net-new rather than a port. xtext has a `gtk_xtext_search`
-//! (xtext.c:5190) built on GRegex plus a `search_found` list threaded
-//! through the entry chain, but nothing in GtkHx has ever called it —
-//! it arrived with the HexChat vendoring and has never run under GTK 4.
-//! Reproducing it would mean debugging a dead subsystem that C5 deletes,
-//! so the engine here is written against the structured message model
-//! instead, where a match is a `(message, source, byte range)` and needs
-//! no parallel bookkeeping on the buffer at all.
+//! Net-new rather than a port of xtext's `gtk_xtext_search`, which was
+//! built on GRegex plus a `search_found` list threaded through the entry
+//! chain. Here a match is a `(message, source, byte range)` over the
+//! structured message model and needs no parallel bookkeeping on the
+//! buffer at all.
 //!
 //! Matching is literal, not regex. The needle is what the user typed;
 //! there is no metacharacter vocabulary to explain and no pathological

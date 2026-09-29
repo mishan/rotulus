@@ -2,9 +2,9 @@
 //!
 //! Produces a [`LayoutCache`] for one message at one width: its total
 //! pixel height and the line boxes needed for hit-testing. This is where
-//! the two-column indent layout lives — the timestamp/nick gutter on the
-//! left, the body indented past it — which is the shape GtkHx has always
-//! rendered and which C1..C5 must reproduce exactly.
+//! both layouts live: two columns, with the timestamp and nick gutter on
+//! the left and the body indented past it, and one, with the nick at the
+//! start of the body's first line.
 //!
 //! Measurement goes through [`TextMeasure`], one call per *run*, never
 //! per character. xtext's `find_next_wrap` (xtext.c:3685) measured
@@ -82,7 +82,7 @@ pub struct LayoutCache {
     ///
     /// Only ever set on a *group head* — a continuation row shows
     /// neither the nick nor the icon, which is the whole point of
-    /// grouping. The view resolves the actual texture from the uid at
+    /// grouping. The view resolves the actual image from the key at
     /// draw time, because avatars animate and a cached frame would
     /// freeze.
     pub avatar: Option<AvatarBox>,
@@ -94,7 +94,7 @@ pub struct AvatarBox {
     pub x: u32,
     pub y: u32,
     pub size: u32,
-    pub uid: u16,
+    pub key: u64,
 }
 
 /// Geometry knobs, supplied by the view.
@@ -104,9 +104,8 @@ pub struct LayoutParams {
     pub width: u32,
     /// Two-column mode: body indented past a nick/timestamp gutter.
     pub indent: bool,
-    /// Cap on the gutter width. `chat.c` uses 256 px; below that the
-    /// gutter grows to fit the widest nick seen, which is what
-    /// `gtk_xtext_fix_indent` did.
+    /// Cap on the gutter width. Below it the gutter grows to fit the
+    /// widest nick seen, which is what `gtk_xtext_fix_indent` did.
     pub max_indent: u32,
     /// Current gutter width, shared across the buffer so columns line
     /// up between rows.
@@ -162,9 +161,8 @@ pub fn layout_message(
     // The gutter is only as wide as this message needs; the buffer
     // reconciles the maximum across rows and re-lays out when it grows.
     //
-    // A pre-rendered gutter (the compat path — see Message::gutter) wins
-    // over the speaker's bare nick, because it carries the styling
-    // chat.c already applied and the A/B has to match it exactly.
+    // A pre-rendered gutter (see Message::gutter) wins over the speaker's
+    // bare nick, because it carries the styling the application chose.
     // A grouped row is a continuation of the one above: same speaker,
     // close in time. Its gutter is suppressed so a burst of messages
     // reads as one block under one name instead of repeating the nick
@@ -182,7 +180,7 @@ pub fn layout_message(
     // the moment a run forms and every column in the buffer jumps.
     let avatar_slot = if params.indent && params.avatar_size > 0 {
         match &msg.speaker {
-            Some(s) if s.uid != 0 => params.avatar_size + params.gutter_gap,
+            Some(s) if s.key != 0 => params.avatar_size + params.gutter_gap,
             _ => 0,
         }
     } else {
@@ -231,46 +229,81 @@ pub fn layout_message(
             x: params.stamp_width,
             y: 0,
             size: params.avatar_size,
-            uid: s.uid,
+            key: s.key,
         })
     } else {
         None
     };
 
-    if params.indent && !grouped {
-        if let Some(g) = &msg.gutter {
-            if !g.text.is_empty() {
-                let gw = measure_styled(g, 0..g.text.len(), measure);
-                let gx = params
-                    .indent_width
-                    .saturating_sub(gw + params.gutter_gap)
-                    .max(params.stamp_width);
-                lines.push(LineBox {
-                    y: 0,
-                    height: line_h,
-                    range: 0..g.text.len(),
-                    source: LineSource::Gutter,
-                    x: gx,
-                    width: gw,
-                });
-            }
+    // Where the first body line starts, in single-column mode: past the
+    // timestamp and the gutter, which share its line instead of having a
+    // column of their own. Zero in two-column mode, where both live in
+    // the gutter column.
+    let mut lead = 0u32;
+    let gutter = msg
+        .gutter
+        .as_ref()
+        .filter(|g| !g.text.is_empty() && !grouped);
+    if let Some(g) = gutter {
+        let gw = measure_styled(g, 0..g.text.len(), measure);
+        let gx = if params.indent {
+            params
+                .indent_width
+                .saturating_sub(gw + params.gutter_gap)
+                .max(params.stamp_width)
+        } else {
+            params.stamp_width
+        };
+        lines.push(LineBox {
+            y: 0,
+            height: line_h,
+            range: 0..g.text.len(),
+            source: LineSource::Gutter,
+            x: gx,
+            width: gw,
+        });
+        if !params.indent {
+            lead = gx + gw + metrics.space_width;
         }
+    } else if !params.indent {
+        lead = params.stamp_width;
+    }
+    // Only a text body can start beside the gutter. Anything else — a
+    // code block, a quote, an image — starts on the line below it, since
+    // it has a box or an indent of its own that the lead would break. So
+    // does a body with less than half the width left beside a long nick:
+    // one word per line down the right edge is worse than a line break.
+    //
+    // Either way the first line is left to the stamp and the gutter, which
+    // the view draws there; a lead is only ever nonzero because one of
+    // them is.
+    if lead > 0 && (!matches!(msg.blocks.first(), Some(Block::Text(_))) || lead > body_width / 2) {
+        y = line_h;
+        lead = 0;
     }
 
     for (bi, block) in msg.blocks.iter().enumerate() {
         match block {
             Block::Text(p) => {
-                let n = wrap_text(p, body_width, params.word_wrap, measure, |range, lw| {
-                    lines.push(LineBox {
-                        y,
-                        height: line_h,
-                        range,
-                        source: LineSource::Block(bi),
-                        x: body_x,
-                        width: lw,
-                    });
-                    y += line_h;
-                });
+                let first = if bi == 0 { lead } else { 0 };
+                let n = wrap_text(
+                    p,
+                    body_width,
+                    first,
+                    params.word_wrap,
+                    measure,
+                    |range, lw, dx| {
+                        lines.push(LineBox {
+                            y,
+                            height: line_h,
+                            range,
+                            source: LineSource::Block(bi),
+                            x: body_x + dx,
+                            width: lw,
+                        });
+                        y += line_h;
+                    },
+                );
                 // An empty block still occupies a line, so a blank
                 // message doesn't collapse to zero height and become
                 // unclickable.
@@ -280,7 +313,7 @@ pub fn layout_message(
                         height: line_h,
                         range: 0..0,
                         source: LineSource::Block(bi),
-                        x: body_x,
+                        x: body_x + first,
                         width: 0,
                     });
                     y += line_h;
@@ -289,8 +322,7 @@ pub fn layout_message(
             Block::Code { text, .. } => {
                 y += params.block_padding;
                 // Code never wraps on words — breaking a token would
-                // change what it says. Overflow clips; the view offers
-                // horizontal scroll in C4.
+                // change what it says. Overflow clips.
                 let mut start = 0usize;
                 // Code blocks carry no spans, so they draw — and so must
                 // measure — in the default style.
@@ -320,7 +352,7 @@ pub fn layout_message(
             Block::Quote { content, depth } => {
                 let qx = body_x + params.quote_indent * u32::from(*depth).max(1);
                 let qw = params.width.saturating_sub(qx).max(line_h);
-                let n = wrap_text(content, qw, params.word_wrap, measure, |range, lw| {
+                let n = wrap_text(content, qw, 0, params.word_wrap, measure, |range, lw, _| {
                     lines.push(LineBox {
                         y,
                         height: line_h,
@@ -370,17 +402,24 @@ pub fn layout_message(
                 // than it has to.
                 None => {
                     let p = ParsedText::plain(alt.clone());
-                    let n = wrap_text(&p, body_width, params.word_wrap, measure, |range, lw| {
-                        lines.push(LineBox {
-                            y,
-                            height: line_h,
-                            range,
-                            source: LineSource::Block(bi),
-                            x: body_x,
-                            width: lw,
-                        });
-                        y += line_h;
-                    });
+                    let n = wrap_text(
+                        &p,
+                        body_width,
+                        0,
+                        params.word_wrap,
+                        measure,
+                        |range, lw, _| {
+                            lines.push(LineBox {
+                                y,
+                                height: line_h,
+                                range,
+                                source: LineSource::Block(bi),
+                                x: body_x,
+                                width: lw,
+                            });
+                            y += line_h;
+                        },
+                    );
                     // Same rule: an image whose alt text is empty must
                     // still be clickable — that is how the user opens
                     // the media dialog before the decode lands.
@@ -439,20 +478,29 @@ pub fn layout_message(
     }
 }
 
-/// Break `p` into visual lines, calling `emit` per line. Returns the
-/// count.
+/// Break `p` into visual lines, calling `emit` per line with the line's
+/// range, its width, and how far right of the block's x it starts.
+/// Returns the count.
+///
+/// The first line starts `first_indent` in and is that much narrower;
+/// every later line has the full width. That is how a single-column row
+/// puts its body beside the nick rather than under it.
 fn wrap_text(
     p: &ParsedText,
     width: u32,
+    first_indent: u32,
     word_wrap: bool,
     measure: &dyn TextMeasure,
-    mut emit: impl FnMut(Range<usize>, u32),
+    mut emit: impl FnMut(Range<usize>, u32, u32),
 ) -> usize {
     if p.text.is_empty() {
         return 0;
     }
     let mut count = 0usize;
     let mut line_start = 0usize;
+    let first_width = width.saturating_sub(first_indent).max(1);
+    let avail = |count: usize| if count == 0 { first_width } else { width };
+    let dx = |count: usize| if count == 0 { first_indent } else { 0 };
 
     while line_start < p.text.len() {
         // A hard newline always breaks.
@@ -463,7 +511,7 @@ fn wrap_text(
         let segment = &p.text[line_start..hard];
 
         if segment.is_empty() {
-            emit(line_start..line_start, 0);
+            emit(line_start..line_start, 0, dx(count));
             count += 1;
             line_start = hard + 1;
             continue;
@@ -476,8 +524,9 @@ fn wrap_text(
                 break;
             }
             let w = measure_styled(p, seg_start..hard, measure);
+            let width = avail(count);
             if w <= width {
-                emit(seg_start..hard, w);
+                emit(seg_start..hard, w, dx(count));
                 count += 1;
                 break;
             }
@@ -506,7 +555,7 @@ fn wrap_text(
             } else {
                 measure_styled(p, seg_start..brk, measure)
             };
-            emit(seg_start..brk, lw);
+            emit(seg_start..brk, lw, dx(count));
             count += 1;
             // Swallow the space we broke on.
             seg_start = brk;
@@ -662,8 +711,38 @@ pub fn estimate_height(msg: &Message, params: &LayoutParams, measure: &dyn TextM
     let mut lines = 0usize;
     let mut extra = 0u32;
 
-    for b in &msg.blocks {
+    // Single-column mode: the stamp and the gutter share the first body
+    // line, so that line has that many fewer columns. Counted in bytes,
+    // like everything else here, which over-counts a multibyte nick — on
+    // the safe side.
+    let gutter_cols = msg
+        .gutter
+        .as_ref()
+        .filter(|g| !g.text.is_empty() && !msg.flags.contains(MessageFlags::GROUPED))
+        .map(|g| g.text.len() + 1);
+    let mut lead_cols = if params.indent {
+        0
+    } else {
+        (params.stamp_width / metrics.space_width.max(1)) as usize + gutter_cols.unwrap_or(0)
+    };
+    // The same rule `layout_message` applies: a body that cannot start
+    // beside the gutter starts on the line below it.
+    let beside = matches!(msg.blocks.first(), Some(Block::Text(_))) && lead_cols <= cols / 2;
+    if lead_cols > 0 && !beside {
+        lines += 1;
+        lead_cols = 0;
+    }
+
+    for (bi, b) in msg.blocks.iter().enumerate() {
         match b {
+            Block::Text(p) if bi == 0 && lead_cols > 0 => {
+                // Pad the first segment by the lead, then wrap as usual.
+                let (first, rest) = p.text.split_once('\n').unwrap_or((&p.text, ""));
+                lines += (first.len() + lead_cols).div_ceil(cols).max(1);
+                if p.text.contains('\n') {
+                    lines += wrapped(rest);
+                }
+            }
             Block::Text(p) => lines += wrapped(&p.text),
             Block::Code { text, .. } => {
                 // Code never wraps, so it is exactly its own line count —
@@ -697,7 +776,7 @@ pub fn estimate_height(msg: &Message, params: &LayoutParams, measure: &dyn TextM
     let avatar_h = if params.indent
         && params.avatar_size > 0
         && !msg.flags.contains(MessageFlags::GROUPED)
-        && msg.speaker.as_ref().is_some_and(|s| s.uid != 0)
+        && msg.speaker.as_ref().is_some_and(|s| s.key != 0)
     {
         params.avatar_size
     } else {

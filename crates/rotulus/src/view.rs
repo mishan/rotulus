@@ -1,54 +1,55 @@
-//! `HxChatView` — the GTK4 chat output widget.
+//! `RotulusView` — the GTK4 chat output widget.
 //!
-//! The tree's first Rust custom-drawn widget: nothing else in
-//! `rust/crates/` implements `WidgetImpl::snapshot` / `measure` /
-//! `size_allocate` or `ScrollableImpl`. Everything interesting is in
-//! `hxchat-layout`; this is the skin.
+//! A custom-drawn `WidgetImpl::snapshot` / `measure` / `size_allocate`
+//! and a `ScrollableImpl`. Everything interesting is in
+//! `rotulus-layout`; this is the skin.
 //!
-//! Two departures from xtext are visible right here:
+//! Two departures from HexChat's xtext, which this replaced, are visible
+//! right here:
 //!
-//! - **Native GSK nodes, not cairo.** xtext draws through
-//!   `gtk_snapshot_append_cairo()` — a correct Phase 4 decision that
-//!   preserved the Phase 3.4b cairo work, but it hands GSK one opaque
-//!   texture per frame. `append_layout` / `append_color` hand it real
-//!   render nodes it can batch and the GPU can composite.
-//! - **The adjustment is in pixels.** xtext's `page_size` is
-//!   `height / fontsize` and its `value` is a fractional line number
-//!   (xtext.c:919), which is only coherent when every row is the same
-//!   height. Here `value`, `upper` and `page_size` are all pixels.
-//!
-//! C2 scope is text only. Media rows render as their placeholder text
-//! (which is exactly what Phase 9.D shipped and what the PM windows —
-//! the first surface this is wired to — never produce anyway); real
-//! inline images and the chat-history row kinds land in C4.
+//! - **Native GSK nodes, not cairo.** xtext drew through
+//!   `gtk_snapshot_append_cairo()`, which hands GSK one opaque texture
+//!   per frame. `append_layout` / `append_color` hand it real render
+//!   nodes it can batch and the GPU can composite.
+//! - **The adjustment is in pixels.** xtext's `page_size` was
+//!   `height / fontsize` and its `value` a fractional line number, which
+//!   is only coherent when every row is the same height. Here `value`,
+//!   `upper` and `page_size` are all pixels.
 
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
-use hxchat_layout::{
+use rotulus_layout::{
     Caret, ChatBuffer, ColorRef, LayoutParams, LineSource, Message, MessageId, ParsedText,
     RowSelection, Selection, Span, Style, TextMeasure, MIN_INDENT,
 };
 
 use crate::measure::PangoMeasure;
 
-/// Palette size, matching `chat_view.h`'s `HX_CHAT_PAL_COLS`.
+/// Palette size, matching `rotulus.h`'s `ROTULUS_PAL_COLS`.
 pub const PALETTE_COLS: usize = 55;
 pub const PAL_FG: usize = 34;
 pub const PAL_BG: usize = 35;
-/// `HX_CHAT_PAL_HISTORY_MUTED` — the theme's secondary text colour.
+/// `ROTULUS_PAL_MUTED` — secondary text: history, captions.
 pub const PAL_HISTORY_MUTED: usize = 37;
-/// `HX_CHAT_PAL_TIMESTAMP` — the timestamp column. Themes default it to
+/// `ROTULUS_PAL_TIMESTAMP` — the timestamp column. Themes default it to
 /// the secondary text colour so the stamps recede behind the message
 /// text rather than competing with it.
 pub const PAL_TIMESTAMP: usize = 38;
-/// `HX_CHAT_PAL_RULE` — the column divider. Themes default it to the text
+/// `ROTULUS_PAL_RULE` — the column divider. Themes default it to the text
 /// color, which is how it was always drawn.
 pub const PAL_RULE: usize = 46;
-/// `HX_CHAT_PAL_MARK_FG` / `_MARK_BG` — the selection colours, filled by
+/// `ROTULUS_PAL_MARK_FG` / `_MARK_BG` — the selection colours, filled by
 /// the theme exactly as they were for xtext.
 pub const PAL_MARK_FG: usize = 32;
 pub const PAL_MARK_BG: usize = 33;
+/// `ROTULUS_PAL_NICK_COLOR0` — the first per-nick color.
+pub const PAL_NICK_COLOR0: usize = 47;
+/// `ROTULUS_PAL_MARKER` — the last-read marker line.
+pub const PAL_MARKER: usize = 36;
+
+/// Thickness of the last-read marker, in px.
+const MARKER_HEIGHT: f32 = 2.0;
 
 /// Pixels of slop within which a scroll position counts as "at the
 /// bottom" and resumes following.
@@ -80,43 +81,33 @@ fn focus_is_text_entry(c: &gtk4::EventControllerKey) -> bool {
 
 /// Floor for a decoded animation's per-frame delay, in ms.
 ///
-/// Matches xtext, which clamps to 10 at both arm sites (xtext.c:6309 and
-/// :6365). A higher floor would visibly slow fast GIFs relative to the
-/// backend this has to be indistinguishable from during the A/B.
+/// Browsers clamp to about the same; a higher floor would visibly slow
+/// fast GIFs.
 const MIN_FRAME_DELAY_MS: u32 = 10;
 
-#[cfg(not(test))]
-extern "C" {
-    /// `hx_chat_avatar_for_uid` — see `src/chat_avatar.h`.
-    ///
-    /// Borrowed, and only until the next call: animated avatars advance
-    /// on a shared frame timer, so this is asked per draw rather than
-    /// cached. The expensive half (decoding a cicn sprite) is cached on
-    /// the C side, keyed by icon id.
-    fn hx_chat_avatar_for_uid(
-        anchor: *mut gtk4::ffi::GtkWidget,
-        uid: u16,
-    ) -> *mut gtk4::gdk::ffi::GdkTexture;
+/// Resolves a speaker's key to the image drawn in the avatar slot.
+///
+/// Asked on every draw rather than once per row, because an avatar may
+/// animate and a cached frame would freeze it. Implementations that
+/// decode something expensive should cache it themselves.
+pub type AvatarFunc = Box<dyn Fn(&RotulusView, u64) -> Option<gtk4::gdk::Paintable>>;
 
-    /// `hx_popup_item_install_css` — see `src/users.h`. Idempotent.
-    fn hx_popup_item_install_css();
+/// Which way a load-more row pages, as the `load-more` signal reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, glib::Enum)]
+#[enum_type(name = "RotulusLoadDirection")]
+pub enum LoadDirection {
+    Older = 0,
+    Newer = 1,
 }
 
-/// The test binary links no GtkHx C, so stub the resolver — same
-/// arrangement `links.rs` uses for `gtkurl_*`. Always "no icon", which
-/// is the only answer a headless test could check anyway.
-#[cfg(test)]
-unsafe fn hx_chat_avatar_for_uid(
-    _anchor: *mut gtk4::ffi::GtkWidget,
-    _uid: u16,
-) -> *mut gtk4::gdk::ffi::GdkTexture {
-    std::ptr::null_mut()
+impl From<rotulus_layout::LoadMoreDirection> for LoadDirection {
+    fn from(d: rotulus_layout::LoadMoreDirection) -> Self {
+        match d {
+            rotulus_layout::LoadMoreDirection::Older => LoadDirection::Older,
+            rotulus_layout::LoadMoreDirection::Newer => LoadDirection::Newer,
+        }
+    }
 }
-
-/// Ditto: the CSS provider lives in `users.c`, which the test binary
-/// doesn't link. Styling is not what these tests check.
-#[cfg(test)]
-unsafe fn hx_popup_item_install_css() {}
 
 /// Something under the pointer that responds to being clicked.
 ///
@@ -126,15 +117,27 @@ unsafe fn hx_popup_item_install_css() {}
 /// underlining under subtly different conditions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HoverTarget {
-    /// A URL: the row, the source it lives in, and its byte range.
+    /// A URL: the row, the source it lives in, its byte range, and where
+    /// it goes. `disguised` when the visible text isn't the address — a
+    /// markdown `[label](url)` — so a click can't be trusted to go where
+    /// the reader thinks.
     Link {
         message: MessageId,
         source: LineSource,
         range: std::ops::Range<usize>,
+        href: String,
+        disguised: bool,
     },
-    /// A speaker's nick in the gutter. Carries the uid so the
-    /// right-click handler doesn't have to re-resolve it.
-    Nick { message: MessageId, uid: u16 },
+    /// A speaker's nick in the gutter, or their avatar. Carries the key
+    /// so the click handlers don't have to re-resolve it.
+    Nick { message: MessageId, key: u64 },
+    /// A load-more row: anywhere on it pages.
+    LoadMore {
+        message: MessageId,
+        direction: LoadDirection,
+    },
+    /// An inline image, decoded or still showing its placeholder.
+    Media { message: MessageId, token: u32 },
 }
 
 impl HoverTarget {
@@ -145,10 +148,14 @@ impl HoverTarget {
                 message,
                 source,
                 range,
+                ..
             } => Some((*message, *source, range.clone())),
-            // The whole gutter underlines, which the draw path handles
-            // by range rather than specially — see hover_range_for.
-            HoverTarget::Nick { .. } => None,
+            // The whole gutter underlines, and so does the whole of a
+            // load-more row; the draw path handles both by range rather
+            // than specially — see hover_range_for.
+            HoverTarget::Nick { .. } | HoverTarget::LoadMore { .. } | HoverTarget::Media { .. } => {
+                None
+            }
         }
     }
 }
@@ -183,7 +190,7 @@ impl Mark {
 /// papercut, and this way there is one place to change it.
 ///
 /// Fixed rather than themed, deliberately: the palette is a contract
-/// with `chat_view.h` (38 slots, mirrored in the theme file format), so
+/// with `rotulus.h` (38 slots, mirrored in the theme file format), so
 /// widening it for this would mean a schema change every theme has to
 /// answer.
 const SEARCH_MATCH_BG: gtk4::gdk::RGBA = gtk4::gdk::RGBA::new(0.9647, 0.8275, 0.1765, 1.0);
@@ -200,8 +207,8 @@ const WHEEL_LINES: f64 = 3.0;
 
 /// Backing for `code` spans and code blocks.
 ///
-/// The monospace attribute alone is invisible here: GtkHx's chat font is
-/// *already* monospace by default, so `` `code` `` rendered identically
+/// The monospace attribute alone is invisible when the chat font is
+/// *already* monospace, as it often is: `` `code` `` rendered identically
 /// to code with the backticks quietly removed — strictly worse than not
 /// parsing it. The tint is what actually says "this is code".
 ///
@@ -224,12 +231,15 @@ const SEPARATOR_GRAB: f64 = 4.0;
 /// Applied by shrinking the content box, not by translating the drawing,
 /// so wrapping, scroll extent and (later) hit-testing all agree about
 /// where the content actually is.
-const PAD_X: i32 = 4;
-const PAD_Y: i32 = 2;
+pub(crate) const PAD_X: i32 = 4;
+pub(crate) const PAD_Y: i32 = 2;
 
-/// xtext's built-in timestamp format, which chat.c depends on as the
-/// default (`gtk_xtext_set_stamp_format(NULL)` restores it).
-const DEFAULT_STAMP_FORMAT: &str = "[%H:%M:%S] ";
+/// The timestamp format a view starts with, and what an empty format
+/// restores.
+pub const DEFAULT_STAMP_FORMAT: &str = "[%H:%M:%S] ";
+
+/// The font a view starts with.
+pub const DEFAULT_FONT: &str = "Monospace 10";
 
 /// One decoded media item. Internal widget state.
 #[derive(Clone)]
@@ -254,8 +264,8 @@ impl MediaEntry {
 
     /// Intrinsic size, from the first frame — every frame of a glycin
     /// animation shares dimensions.
-    pub(crate) fn size(&self) -> Option<hxchat_layout::ImageSize> {
-        self.frames.first().map(|(t, _)| hxchat_layout::ImageSize {
+    pub(crate) fn size(&self) -> Option<rotulus_layout::ImageSize> {
+        self.frames.first().map(|(t, _)| rotulus_layout::ImageSize {
             width: t.width().max(0) as u32,
             height: t.height().max(0) as u32,
         })
@@ -271,11 +281,11 @@ impl std::fmt::Debug for MediaEntry {
     }
 }
 
-mod imp {
+pub(crate) mod imp {
     use super::*;
     use std::cell::{Cell, RefCell};
 
-    pub struct HxChatView {
+    pub struct RotulusView {
         pub buffer: RefCell<ChatBuffer>,
         pub measure: RefCell<PangoMeasure>,
         pub palette: RefCell<[gtk4::gdk::RGBA; PALETTE_COLS]>,
@@ -296,7 +306,7 @@ mod imp {
         /// selecting text.
         pub moving_separator: Cell<bool>,
         /// In-buffer search: the query, its hits, and the cursor.
-        pub search: RefCell<hxchat_layout::SearchState>,
+        pub search: RefCell<rotulus_layout::SearchState>,
         /// Monotonic time (µs) at which the zoom badge stops showing,
         /// or 0 when it isn't showing. See `flash_zoom_badge`.
         pub zoom_badge_until: Cell<i64>,
@@ -307,7 +317,7 @@ mod imp {
         /// the two cannot disagree about what is hoverable.
         pub(crate) hovered: RefCell<Option<HoverTarget>>,
         /// Whether the timestamp column renders. Driven by CFG_TIMESTAMP
-        /// through `hx_chat_view_set_time_stamp`.
+        /// through `rotulus_view_set_time_stamp`.
         pub time_stamp: Cell<bool>,
         /// The live selection, or None when nothing is selected.
         pub selection: RefCell<Option<Selection>>,
@@ -319,13 +329,12 @@ mod imp {
         /// view moves to a different window.
         pub root_key_handler:
             RefCell<Option<(glib::object::WeakRef<gtk4::Widget>, gtk4::EventController)>>,
-        /// strftime format for that column. xtext's default is
-        /// "[%H:%M:%S] " and chat.c relies on getting it.
+        /// strftime format for that column.
         pub stamp_format: RefCell<String>,
         /// Decoded media, keyed by the per-conversation token.
         ///
         /// The textures live here rather than on the layout's
-        /// `Block::Image` because `hxchat-layout` is GTK-free by
+        /// `Block::Image` because `rotulus-layout` is GTK-free by
         /// design — it carries only the *size*, which is all it needs
         /// to lay the row out. The token is the join.
         pub(crate) media: RefCell<std::collections::HashMap<u32, MediaEntry>>,
@@ -355,14 +364,35 @@ mod imp {
         /// Auto-scroll tick, running only while a drag is outside the
         /// viewport.
         pub autoscroll_tick: RefCell<Option<gtk4::TickCallbackId>>,
+        /// The application's avatar resolver, if it installed one.
+        pub avatar_func: RefCell<Option<AvatarFunc>>,
+        /// What counts as a link: autolinking, the markdown allowlist,
+        /// and the link under the pointer all ask this.
+        pub linkifier: RefCell<rotulus_layout::Linkifier>,
+        /// Render markdown in bodies appended from now on.
+        pub markdown: Cell<bool>,
+        /// Copy to the clipboards when a drag-select ends.
+        pub autocopy: Cell<bool>,
+        /// Prefix each copied row with its timestamp.
+        pub copy_timestamps: Cell<bool>,
+        /// A primary click on a link opens it.
+        pub activate_links: Cell<bool>,
+        /// The font as last set, for the `font` property to read back.
+        pub font: RefCell<String>,
+        /// The row the last-read marker is drawn under, if any.
+        pub marker: Cell<Option<MessageId>>,
+        /// The accessible text, built when an assistive technology first
+        /// asks for it and kept in step with appends from then on.
+        #[cfg(feature = "v4_14")]
+        pub(crate) a11y: RefCell<Option<crate::a11y::TextModel>>,
     }
 
-    impl Default for HxChatView {
+    impl Default for RotulusView {
         fn default() -> Self {
-            HxChatView {
+            RotulusView {
                 buffer: RefCell::new(ChatBuffer::new(LayoutParams::default())),
-                measure: RefCell::new(PangoMeasure::headless("Monospace 10")),
-                palette: RefCell::new([gtk4::gdk::RGBA::BLACK; PALETTE_COLS]),
+                measure: RefCell::new(PangoMeasure::headless(DEFAULT_FONT)),
+                palette: RefCell::new(default_palette()),
                 hadjustment: RefCell::new(None),
                 vadjustment: RefCell::new(None),
                 hscroll_policy: Cell::new(gtk4::ScrollablePolicy::Minimum),
@@ -372,7 +402,7 @@ mod imp {
                 font_generation: Cell::new(0),
                 separator: Cell::new(false),
                 moving_separator: Cell::new(false),
-                search: RefCell::new(hxchat_layout::SearchState::new()),
+                search: RefCell::new(rotulus_layout::SearchState::new()),
                 hovered: RefCell::new(None),
                 zoom_badge_until: Cell::new(0),
                 zoom_badge_tick: RefCell::new(None),
@@ -388,67 +418,101 @@ mod imp {
                 drag_start: RefCell::new(None),
                 drag_moved: Cell::new(false),
                 autoscroll_tick: RefCell::new(None),
+                avatar_func: RefCell::new(None),
+                linkifier: RefCell::new(rotulus_layout::Linkifier::default()),
+                markdown: Cell::new(true),
+                autocopy: Cell::new(true),
+                copy_timestamps: Cell::new(false),
+                activate_links: Cell::new(true),
+                font: RefCell::new(DEFAULT_FONT.to_string()),
+                marker: Cell::new(None),
+                #[cfg(feature = "v4_14")]
+                a11y: RefCell::new(None),
             }
         }
     }
 
     #[glib::object_subclass]
-    impl ObjectSubclass for HxChatView {
-        const NAME: &'static str = "HxChatView";
-        type Type = super::HxChatView;
+    impl ObjectSubclass for RotulusView {
+        const NAME: &'static str = "RotulusView";
+        type Type = super::RotulusView;
         type ParentType = gtk4::Widget;
+        #[cfg(not(feature = "v4_14"))]
         type Interfaces = (gtk4::Scrollable,);
+        #[cfg(feature = "v4_14")]
+        type Interfaces = (gtk4::Scrollable, gtk4::AccessibleText);
+
+        fn class_init(klass: &mut Self::Class) {
+            // A chat transcript is a log: new content arrives at the end,
+            // and older content scrolls away. It is what assistive
+            // technologies expect a conversation to announce itself as.
+            klass.set_accessible_role(gtk4::AccessibleRole::Log);
+        }
     }
 
-    impl ObjectImpl for HxChatView {
+    impl ObjectImpl for RotulusView {
         fn signals() -> &'static [glib::subclass::Signal] {
+            use std::ops::ControlFlow;
             use std::sync::OnceLock;
             static S: OnceLock<Vec<glib::subclass::Signal>> = OnceLock::new();
+            // The first handler to say it dealt with the event stops the
+            // emission, and the view falls back to its own behavior only
+            // when nobody did.
+            fn first_handled(
+                _: &glib::subclass::SignalInvocationHint,
+                _: glib::Value,
+                ret: &glib::Value,
+            ) -> ControlFlow<glib::Value, glib::Value> {
+                if ret.get::<bool>().unwrap_or(false) {
+                    ControlFlow::Break(ret.clone())
+                } else {
+                    ControlFlow::Continue(ret.clone())
+                }
+            }
             S.get_or_init(|| {
                 vec![
-                    // xtext's signal, and now genuinely emitted.
-                    //
-                    // Parity beat purity here. The three C handlers
-                    // chat.c and msg.c connect — gtkurl, chat-history's
-                    // load-older sentinel, and inline media's
-                    // `hxmedia:N` — all recognise their targets by
-                    // matching the clicked *word* as a string. Emitting
-                    // the same signal with the same tokenisation makes
-                    // all three work against the new backend with zero
-                    // C changes, which is exactly what the A/B needs.
-                    // The typed replacements in scoping §3.6 are still
-                    // the destination, but they belong with the
-                    // structured append in C6, not ahead of parity.
-                    //
-                    // **"word-click", not "word_click".** glib-rs's
-                    // Signal::builder requires a canonical name and
-                    // *panics* otherwise — and a panic here is an abort,
-                    // since it unwinds out of `class_init` across the
-                    // FFI. The C callers keep their underscore spelling
-                    // and still resolve: GLib canonicalises `_` to `-`
-                    // on both registration and lookup, so
-                    // `g_signal_lookup("word_click")` and
-                    // `g_signal_lookup("word-click")` return the same id.
-                    // (Verified against GLib directly, not assumed —
-                    // it's the same equivalence that lets everyone write
-                    // "size_allocate" for "size-allocate".)
-                    //
-                    // Registered as (POINTER, POINTER) to match xtext,
-                    // which registers both args as G_TYPE_POINTER —
-                    // the marshaller never inspected the concrete
-                    // GdkEvent shape.
-                    glib::subclass::Signal::builder("word-click")
-                        .param_types([glib::Pointer::static_type(), glib::Pointer::static_type()])
+                    // (href) -> handled. A primary click on a link. Unhandled,
+                    // the view opens it with the desktop's handler.
+                    glib::subclass::Signal::builder("link-activated")
+                        .param_types([String::static_type()])
+                        .return_type::<bool>()
+                        .run_last()
+                        .accumulator(first_handled)
                         .build(),
-                    // speaker-menu: (uid, x, y) — right-click on a nick.
-                    //
-                    // The view raises it and stops; chat.c answers by
-                    // calling users.c::user_popup_show, so chat and the
-                    // user list pop the *same* menu rather than two that
-                    // have to be kept in step.
+                    // (href, x, y) -> handled. A secondary or middle click on
+                    // a link, in widget coordinates. Unhandled, the view pops
+                    // its own Open / Copy menu.
+                    glib::subclass::Signal::builder("link-menu")
+                        .param_types([
+                            String::static_type(),
+                            f64::static_type(),
+                            f64::static_type(),
+                        ])
+                        .return_type::<bool>()
+                        .run_last()
+                        .accumulator(first_handled)
+                        .build(),
+                    // (key) — a primary click on a speaker's nick or avatar.
+                    glib::subclass::Signal::builder("speaker-activated")
+                        .param_types([u64::static_type()])
+                        .build(),
+                    // (key, x, y) — a secondary click on a speaker's nick or
+                    // avatar. The view raises it and stops: what belongs on a
+                    // person's menu is the application's business.
                     glib::subclass::Signal::builder("speaker-menu")
-                        .param_types([u32::static_type(), f64::static_type(), f64::static_type()])
+                        .param_types([u64::static_type(), f64::static_type(), f64::static_type()])
                         .build(),
+                    // (direction) — a click on a load-more row.
+                    glib::subclass::Signal::builder("load-more")
+                        .param_types([LoadDirection::static_type()])
+                        .build(),
+                    // (token) — a primary click on an inline image, or on the
+                    // placeholder standing in for one.
+                    glib::subclass::Signal::builder("media-activated")
+                        .param_types([u32::static_type()])
+                        .build(),
+                    // The selection was made, extended or cleared.
+                    glib::subclass::Signal::builder("selection-changed").build(),
                 ]
             })
         }
@@ -466,7 +530,7 @@ mod imp {
             // widgets.
             obj.set_overflow(gtk4::Overflow::Hidden);
             // Adwaita's content-view colors, for palette slots the theme
-            // leaves to the system (see `HxChatView::pal`): the CSS
+            // leaves to the system (see `RotulusView::pal`): the CSS
             // background shows through where the view skips its fill,
             // and `color()` supplies the text color.
             obj.add_css_class("view");
@@ -474,16 +538,8 @@ mod imp {
             // context so text is shaped with the real display's font
             // config, not the headless default the struct starts with.
             let ctx = obj.pango_context();
-            let font = pango::FontDescription::from_string("Monospace 10");
+            let font = pango::FontDescription::from_string(DEFAULT_FONT);
             *self.measure.borrow_mut() = PangoMeasure::new(ctx, font);
-
-            // Adopt the persisted stamp format. prefs_read applies it
-            // before any window exists, so without this a view would
-            // keep the built-in default and ignore the user's pref
-            // until they happened to change it again.
-            if let Some(f) = prefs::STAMP_FORMAT.with(|f| f.borrow().clone()) {
-                *self.stamp_format.borrow_mut() = f;
-            }
 
             obj.install_selection_gestures();
             obj.install_zoom_bindings();
@@ -494,40 +550,120 @@ mod imp {
             use std::sync::OnceLock;
             static P: OnceLock<Vec<glib::ParamSpec>> = OnceLock::new();
             P.get_or_init(|| {
-                // **Override, don't redeclare.**
+                // **Override, don't redeclare, the scrollable four.**
                 //
-                // These four properties belong to the GtkScrollable
-                // interface. An implementor overrides them; it does not
-                // define new ones. Declaring fresh ParamSpecs with the
-                // same names — which is what the first cut did — collides
-                // with the interface's, `g_object_class_install_property`
-                // refuses them, and the class is left half-built.
-                //
-                // The symptom was not a warning about properties. It was
-                // `g_object_new` handing back something that failed
-                // `GTK_IS_WIDGET`, so the very first C call on it
-                // (`gtk_widget_set_can_focus`) asserted, `is_hxchat`
-                // returned false on it, and the next call was dispatched
-                // into xtext with a non-xtext pointer — segfaulting in
-                // `gtk_xtext_set_time_stamp` with a garbage buffer. Three
-                // symptoms, one cause, none of them pointing here.
+                // These belong to the GtkScrollable interface. An
+                // implementor overrides them; declaring fresh ParamSpecs
+                // with the same names collides with the interface's,
+                // `g_object_class_install_property` refuses them, and the
+                // class is left half-built — `g_object_new` hands back
+                // something that fails `GTK_IS_WIDGET`, with nothing in the
+                // symptom pointing here.
                 vec![
                     glib::ParamSpecOverride::for_interface::<gtk4::Scrollable>("hadjustment"),
                     glib::ParamSpecOverride::for_interface::<gtk4::Scrollable>("vadjustment"),
                     glib::ParamSpecOverride::for_interface::<gtk4::Scrollable>("hscroll-policy"),
                     glib::ParamSpecOverride::for_interface::<gtk4::Scrollable>("vscroll-policy"),
+                    glib::ParamSpecString::builder("font")
+                        .nick("Font")
+                        .blurb("Pango font description for the text")
+                        .default_value(Some(DEFAULT_FONT))
+                        .build(),
+                    glib::ParamSpecBoolean::builder("word-wrap")
+                        .nick("Word wrap")
+                        .blurb("Break long lines between words rather than anywhere")
+                        .default_value(true)
+                        .build(),
+                    glib::ParamSpecInt::builder("max-lines")
+                        .nick("Maximum lines")
+                        .blurb("Rows kept before the oldest are dropped; 0 keeps everything")
+                        .minimum(0)
+                        .default_value(0)
+                        .build(),
+                    glib::ParamSpecBoolean::builder("indent")
+                        .nick("Two columns")
+                        .blurb("Give timestamps and nicks a column of their own")
+                        .default_value(true)
+                        .build(),
+                    glib::ParamSpecInt::builder("max-indent")
+                        .nick("Maximum indent")
+                        .blurb("How wide the nick column may grow, in pixels")
+                        .minimum(0)
+                        .default_value(256)
+                        .build(),
+                    glib::ParamSpecBoolean::builder("separator")
+                        .nick("Separator")
+                        .blurb("Draw a rule between the nick column and the text")
+                        .default_value(false)
+                        .build(),
+                    glib::ParamSpecBoolean::builder("show-timestamps")
+                        .nick("Show timestamps")
+                        .default_value(false)
+                        .build(),
+                    glib::ParamSpecString::builder("timestamp-format")
+                        .nick("Timestamp format")
+                        .blurb("strftime(3) format for the timestamp column")
+                        .default_value(Some(DEFAULT_STAMP_FORMAT))
+                        .build(),
+                    glib::ParamSpecInt::builder("avatar-size")
+                        .nick("Avatar size")
+                        .blurb("Edge of the avatar beside a speaker, in pixels; 0 hides avatars")
+                        .minimum(0)
+                        .default_value(0)
+                        .build(),
+                    glib::ParamSpecInt::builder("group-gap")
+                        .nick("Group gap")
+                        .blurb("Seconds between one speaker's messages that start a new group; 0 never groups")
+                        .minimum(0)
+                        .default_value(rotulus_layout::buffer::DEFAULT_GROUP_GAP_SECS as i32)
+                        .build(),
+                    glib::ParamSpecBoolean::builder("markdown")
+                        .nick("Markdown")
+                        .blurb("Render markdown in bodies appended from now on")
+                        .default_value(true)
+                        .build(),
+                    glib::ParamSpecBoxed::builder::<Vec<String>>("link-schemes")
+                        .nick("Link schemes")
+                        .blurb("URL scheme prefixes that become links, such as \"https://\" and \"mailto:\"")
+                        .build(),
+                    glib::ParamSpecBoolean::builder("autocopy")
+                        .nick("Copy on select")
+                        .blurb("Copy the selection to the clipboards when a drag ends")
+                        .default_value(true)
+                        .build(),
+                    glib::ParamSpecBoolean::builder("activate-links")
+                        .nick("Activate links")
+                        .blurb("Open a link on a primary click; the link menu works either way")
+                        .default_value(true)
+                        .build(),
+                    glib::ParamSpecBoolean::builder("copy-timestamps")
+                        .nick("Copy timestamps")
+                        .blurb("Prefix each copied row with its timestamp")
+                        .default_value(false)
+                        .build(),
+                    glib::ParamSpecDouble::builder("zoom")
+                        .nick("Zoom")
+                        .blurb("Text scale, where 1.0 is the font's own size")
+                        .minimum(0.1)
+                        .maximum(10.0)
+                        .default_value(1.0)
+                        .build(),
+                    glib::ParamSpecBoolean::builder("has-selection")
+                        .nick("Has selection")
+                        .read_only()
+                        .build(),
                 ]
             })
         }
 
         fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
+            let obj = self.obj();
             match pspec.name() {
                 "hadjustment" => {
                     *self.hadjustment.borrow_mut() = value.get().ok().flatten();
                 }
                 "vadjustment" => {
-                    self.obj()
-                        .set_vadjustment_internal(value.get().ok().flatten());
+                    obj.set_vadjustment_internal(value.get().ok().flatten());
                 }
                 "hscroll-policy" => {
                     if let Ok(v) = value.get() {
@@ -539,22 +675,89 @@ mod imp {
                         self.vscroll_policy.set(v);
                     }
                 }
+                "font" => {
+                    let f: Option<String> = value.get().ok().flatten();
+                    obj.apply_font(
+                        f.as_deref()
+                            .filter(|f| !f.is_empty())
+                            .unwrap_or(DEFAULT_FONT),
+                    );
+                }
+                "word-wrap" => obj.apply_word_wrap(value.get().unwrap_or(true)),
+                "max-lines" => obj.apply_max_rows(value.get().unwrap_or(0)),
+                "indent" => obj.apply_indent(value.get().unwrap_or(true)),
+                "max-indent" => obj.apply_max_indent(value.get().unwrap_or(256)),
+                "separator" => {
+                    self.separator.set(value.get().unwrap_or(false));
+                    obj.queue_draw();
+                }
+                "show-timestamps" => obj.apply_time_stamp(value.get().unwrap_or(false)),
+                "timestamp-format" => {
+                    let f: Option<String> = value.get().ok().flatten();
+                    obj.apply_stamp_format(f.as_deref().unwrap_or(""));
+                }
+                "avatar-size" => {
+                    obj.apply_avatar_size(value.get::<i32>().unwrap_or(0).max(0) as u32)
+                }
+                "group-gap" => {
+                    obj.apply_group_gap_secs(value.get::<i32>().unwrap_or(0).max(0) as i64)
+                }
+                "markdown" => self.markdown.set(value.get().unwrap_or(true)),
+                "link-schemes" => {
+                    let schemes: Vec<String> = value.get().unwrap_or_default();
+                    *self.linkifier.borrow_mut() = if schemes.is_empty() {
+                        rotulus_layout::Linkifier::default()
+                    } else {
+                        rotulus_layout::Linkifier::new(schemes)
+                    };
+                }
+                "autocopy" => self.autocopy.set(value.get().unwrap_or(true)),
+                "copy-timestamps" => self.copy_timestamps.set(value.get().unwrap_or(false)),
+                "activate-links" => self.activate_links.set(value.get().unwrap_or(true)),
+                "zoom" => {
+                    let z: f64 = value.get().unwrap_or(1.0);
+                    obj.apply_zoom_permille((z * 1000.0).round() as u32);
+                }
                 _ => {}
             }
         }
 
         fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
+            let buf = self.buffer.borrow();
+            let params = buf.params();
             match pspec.name() {
                 "hadjustment" => self.hadjustment.borrow().to_value(),
                 "vadjustment" => self.vadjustment.borrow().to_value(),
                 "hscroll-policy" => self.hscroll_policy.get().to_value(),
                 "vscroll-policy" => self.vscroll_policy.get().to_value(),
+                "font" => self.font.borrow().to_value(),
+                "word-wrap" => params.word_wrap.to_value(),
+                "max-lines" => (buf.max_rows() as i32).to_value(),
+                "indent" => params.indent.to_value(),
+                "max-indent" => (params.max_indent as i32).to_value(),
+                "separator" => self.separator.get().to_value(),
+                "show-timestamps" => self.time_stamp.get().to_value(),
+                "timestamp-format" => self.stamp_format.borrow().to_value(),
+                "avatar-size" => (params.avatar_size as i32).to_value(),
+                "group-gap" => (buf.group_gap_secs() as i32).to_value(),
+                "markdown" => self.markdown.get().to_value(),
+                "link-schemes" => self.linkifier.borrow().schemes().to_vec().to_value(),
+                "autocopy" => self.autocopy.get().to_value(),
+                "copy-timestamps" => self.copy_timestamps.get().to_value(),
+                "activate-links" => self.activate_links.get().to_value(),
+                "zoom" => (f64::from(self.measure.borrow().zoom_permille()) / 1000.0).to_value(),
+                "has-selection" => self
+                    .selection
+                    .borrow()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false)
+                    .to_value(),
                 _ => glib::Value::from_type(glib::Type::UNIT),
             }
         }
     }
 
-    impl WidgetImpl for HxChatView {
+    impl WidgetImpl for RotulusView {
         fn measure(&self, orientation: gtk4::Orientation, _for_size: i32) -> (i32, i32, i32, i32) {
             // A scrollable's natural size must not depend on its
             // content, or the scrolled window grows to fit the whole
@@ -610,41 +813,62 @@ mod imp {
         }
     }
 
-    impl ScrollableImpl for HxChatView {}
+    impl ScrollableImpl for RotulusView {}
 }
 
+#[cfg(not(feature = "v4_14"))]
 glib::wrapper! {
-    pub struct HxChatView(ObjectSubclass<imp::HxChatView>)
+    pub struct RotulusView(ObjectSubclass<imp::RotulusView>)
         @extends gtk4::Widget,
         @implements gtk4::Accessible, gtk4::Buildable, gtk4::ConstraintTarget,
                     gtk4::Scrollable;
 }
 
-impl Default for HxChatView {
+#[cfg(feature = "v4_14")]
+glib::wrapper! {
+    pub struct RotulusView(ObjectSubclass<imp::RotulusView>)
+        @extends gtk4::Widget,
+        @implements gtk4::Accessible, gtk4::Buildable, gtk4::ConstraintTarget,
+                    gtk4::Scrollable, gtk4::AccessibleText;
+}
+
+impl Default for RotulusView {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl HxChatView {
-    pub fn new() -> HxChatView {
+impl RotulusView {
+    pub fn new() -> RotulusView {
         glib::Object::new()
     }
 
-    fn imp_(&self) -> &imp::HxChatView {
-        imp::HxChatView::from_obj(self)
+    fn imp_(&self) -> &imp::RotulusView {
+        imp::RotulusView::from_obj(self)
     }
 
-    /// The private struct, for tests that need to reach the buffer.
-    #[cfg(test)]
-    pub(crate) fn imp_ref(&self) -> &imp::HxChatView {
+    /// The private struct, for the accessibility glue and for tests.
+    pub(crate) fn imp_ref(&self) -> &imp::RotulusView {
         self.imp_()
+    }
+
+    /// How the accessible text formats a row's timestamp: as drawn, or
+    /// not at all when the column is hidden.
+    #[cfg_attr(not(feature = "v4_14"), allow(dead_code))]
+    pub(crate) fn a11y_stamp_fn(&self) -> Box<dyn Fn(i64) -> Option<String>> {
+        let imp = self.imp_();
+        if !imp.time_stamp.get() {
+            return Box::new(|_| None);
+        }
+        let fmt = imp.stamp_format.borrow().clone();
+        Box::new(move |t| format_stamp(t, &fmt))
     }
 
     // ---- configuration ------------------------------------------------
 
-    pub fn set_font_from_string(&self, font: &str) {
+    fn apply_font(&self, font: &str) {
         let imp = self.imp_();
+        *imp.font.borrow_mut() = font.to_string();
         imp.measure
             .borrow_mut()
             .set_font(pango::FontDescription::from_string(font));
@@ -657,7 +881,7 @@ impl HxChatView {
     }
 
     /// A palette slot as drawn. A fully transparent slot means "follow
-    /// the system" (`chat_view.h`): text slots take the widget's CSS
+    /// the system" (`rotulus.h`): text slots take the widget's CSS
     /// color, and the background stays transparent so the `.view`
     /// background CSS paints shows through.
     fn pal(&self, i: usize) -> gtk4::gdk::RGBA {
@@ -674,24 +898,29 @@ impl HxChatView {
         self.queue_draw();
     }
 
-    pub fn set_word_wrap(&self, on: bool) {
+    fn apply_word_wrap(&self, on: bool) {
         self.imp_().buffer.borrow_mut().set_word_wrap(on);
         self.queue_draw();
     }
 
-    pub fn set_max_rows(&self, n: i32) {
-        // xtext only auto-trims when max_lines > 2 (xtext.c:5442), so 1
-        // and 2 mean "no limit" there. Treating them as a literal cap
-        // here would truncate the scrollback to nearly nothing on a pref
-        // value that is a no-op on the other backend — exactly the kind
-        // of silent divergence the A/B is supposed to rule out.
+    fn apply_max_rows(&self, n: i32) {
+        // 1 and 2 mean "no limit", as they did for xtext, which only
+        // trimmed above 2: a scrollback of one row is never what a
+        // setting that small was asking for.
         let cap = if n > 2 { n as usize } else { 0 };
-        let m = self.imp_().measure.borrow();
-        self.imp_().buffer.borrow_mut().set_max_rows(cap, &*m);
+        let before = self.len();
+        {
+            let m = self.imp_().measure.borrow();
+            self.imp_().buffer.borrow_mut().set_max_rows(cap, &*m);
+        }
+        if self.len() != before {
+            self.after_content_change();
+            self.a11y_reset();
+        }
     }
 
     /// Edge length of the avatar slot in the gutter; 0 hides avatars.
-    pub fn set_avatar_size(&self, px: u32) {
+    fn apply_avatar_size(&self, px: u32) {
         let m = self.imp_().measure.borrow();
         let mut buf = self.imp_().buffer.borrow_mut();
         buf.set_avatar_size(px);
@@ -704,7 +933,7 @@ impl HxChatView {
     /// Gap that breaks a run of messages from one speaker; 0 disables
     /// grouping. Re-decides the rows already in the buffer, since the
     /// flag describes neighbours rather than messages.
-    pub fn set_group_gap_secs(&self, secs: i64) {
+    fn apply_group_gap_secs(&self, secs: i64) {
         let m = self.imp_().measure.borrow();
         self.imp_()
             .buffer
@@ -715,12 +944,13 @@ impl HxChatView {
         self.queue_draw();
     }
 
-    pub fn set_indent(&self, on: bool) {
+    fn apply_indent(&self, on: bool) {
         self.imp_().buffer.borrow_mut().set_indent(on);
+        self.queue_resize();
         self.queue_draw();
     }
 
-    pub fn set_max_indent(&self, px: i32) {
+    fn apply_max_indent(&self, px: i32) {
         self.imp_()
             .buffer
             .borrow_mut()
@@ -729,7 +959,7 @@ impl HxChatView {
     }
 
     /// Zoom, per-mille. See docs/chat-view.md "Zoom".
-    pub fn set_zoom_permille(&self, zoom: u32) {
+    fn apply_zoom_permille(&self, zoom: u32) {
         let imp = self.imp_();
         let was = imp.measure.borrow().zoom_permille();
         imp.measure.borrow_mut().set_zoom_permille(zoom);
@@ -843,7 +1073,7 @@ impl HxChatView {
     /// Recomputes the width the gutter must reserve, since the stamp and
     /// the nick share that band — reserving only the nick width is what
     /// makes them overlap.
-    pub fn set_time_stamp(&self, on: bool) {
+    fn apply_time_stamp(&self, on: bool) {
         let imp = self.imp_();
         if imp.time_stamp.get() == on {
             return;
@@ -853,9 +1083,11 @@ impl HxChatView {
         // Relayout, not just redraw: the gutter width changed, so
         // wrapping, row heights and the scroll extent all move with it.
         self.queue_resize();
+        // Every row's accessible text leads with its stamp, or stops.
+        self.a11y_reset();
     }
 
-    pub fn set_stamp_format(&self, format: &str) {
+    fn apply_stamp_format(&self, format: &str) {
         let imp = self.imp_();
         let f = if format.is_empty() {
             DEFAULT_STAMP_FORMAT.to_string()
@@ -868,6 +1100,7 @@ impl HxChatView {
         *imp.stamp_format.borrow_mut() = f;
         self.recompute_stamp_width();
         self.queue_resize();
+        self.a11y_reset();
     }
 
     /// Measure the widest plausible rendering of the current format.
@@ -892,8 +1125,92 @@ impl HxChatView {
         imp.buffer.borrow_mut().set_stamp_width(px);
     }
 
+    // The public setters go through the property system, so a change
+    // made from Rust notifies exactly as one made from C or a binding.
+
+    pub fn set_font_from_string(&self, font: &str) {
+        self.set_property("font", font);
+    }
+
+    pub fn set_word_wrap(&self, on: bool) {
+        self.set_property("word-wrap", on);
+    }
+
+    pub fn set_max_rows(&self, n: i32) {
+        self.set_property("max-lines", n.max(0));
+    }
+
+    pub fn set_avatar_size(&self, px: u32) {
+        self.set_property("avatar-size", px.min(i32::MAX as u32) as i32);
+    }
+
+    pub fn set_group_gap_secs(&self, secs: i64) {
+        self.set_property("group-gap", secs.clamp(0, i32::MAX as i64) as i32);
+    }
+
+    pub fn set_indent(&self, on: bool) {
+        self.set_property("indent", on);
+    }
+
+    pub fn set_max_indent(&self, px: i32) {
+        self.set_property("max-indent", px.max(0));
+    }
+
+    pub fn set_zoom_permille(&self, zoom: u32) {
+        self.set_property("zoom", (f64::from(zoom) / 1000.0).clamp(0.1, 10.0));
+    }
+
+    pub fn set_time_stamp(&self, on: bool) {
+        self.set_property("show-timestamps", on);
+    }
+
+    pub fn set_stamp_format(&self, format: &str) {
+        self.set_property("timestamp-format", format);
+    }
+
     pub fn set_separator(&self, on: bool) {
-        self.imp_().separator.set(on);
+        self.set_property("separator", on);
+    }
+
+    pub fn set_markdown(&self, on: bool) {
+        self.set_property("markdown", on);
+    }
+
+    pub fn set_autocopy(&self, on: bool) {
+        self.set_property("autocopy", on);
+    }
+
+    /// Whether a primary click on a link opens it. Off, a link is text to
+    /// a primary click — it selects like anything else — and still has its
+    /// menu on a secondary one.
+    pub fn set_activate_links(&self, on: bool) {
+        self.set_property("activate-links", on);
+    }
+
+    pub fn set_copy_timestamps(&self, on: bool) {
+        self.set_property("copy-timestamps", on);
+    }
+
+    /// The URL scheme prefixes that become links (`"https://"`,
+    /// `"mailto:"`). An empty list restores the default set.
+    pub fn set_link_schemes(&self, schemes: &[&str]) {
+        let v: Vec<String> = schemes.iter().map(|s| s.to_string()).collect();
+        self.set_property("link-schemes", v);
+    }
+
+    /// The link detector this view uses, for building message bodies.
+    pub fn linkifier(&self) -> rotulus_layout::Linkifier {
+        self.imp_().linkifier.borrow().clone()
+    }
+
+    pub fn markdown(&self) -> bool {
+        self.imp_().markdown.get()
+    }
+
+    /// Install the function that resolves a speaker's key to their
+    /// avatar. `None` removes it, and avatars draw nothing.
+    pub fn set_avatar_func(&self, f: Option<AvatarFunc>) {
+        *self.imp_().avatar_func.borrow_mut() = f;
         self.queue_draw();
     }
 
@@ -901,11 +1218,16 @@ impl HxChatView {
 
     pub fn append(&self, msg: Message) -> MessageId {
         let imp = self.imp_();
+        let before = imp.buffer.borrow().len();
         let id = {
             let m = imp.measure.borrow();
             imp.buffer.borrow_mut().append(msg, &*m)
         };
+        // The buffer grows by exactly one row unless the append trimmed
+        // the oldest ones to make room.
+        let trimmed = (before + 1).saturating_sub(imp.buffer.borrow().len());
         self.after_content_change();
+        self.a11y_appended(id, trimmed);
         id
     }
 
@@ -916,6 +1238,7 @@ impl HxChatView {
             imp.buffer.borrow_mut().insert_before(anchor, msg, &*m)
         };
         self.after_content_change();
+        self.a11y_inserted(id);
         id
     }
 
@@ -926,9 +1249,58 @@ impl HxChatView {
             imp.buffer.borrow_mut().remove(id, &*m)
         };
         if ok {
+            if self.imp_().marker.get() == Some(id) {
+                self.imp_().marker.set(None);
+            }
             self.after_content_change();
+            self.a11y_removed(id);
         }
         ok
+    }
+
+    /// Swap the content of the row `id` names, keeping its place and its
+    /// id. What an edit, a redaction, or a streamed reply growing a token
+    /// at a time wants: marks held on the row stay good, and the scroll
+    /// anchor absorbs any change in height.
+    ///
+    /// Returns `false` when the row is gone.
+    pub fn replace(&self, id: MessageId, msg: Message) -> bool {
+        let ok = {
+            let imp = self.imp_();
+            let m = imp.measure.borrow();
+            imp.buffer.borrow_mut().replace(id, msg, &*m)
+        };
+        if ok {
+            // A search hit or a selection inside the old text would now
+            // point at different bytes.
+            self.imp_().search.borrow_mut().clear();
+            self.clear_selection();
+            self.after_content_change();
+            self.a11y_replaced(id);
+        }
+        ok
+    }
+
+    /// The id of the newest row, if there is one.
+    pub fn last(&self) -> Option<MessageId> {
+        let buf = self.imp_().buffer.borrow();
+        buf.len().checked_sub(1).and_then(|r| buf.id_at(r))
+    }
+
+    /// Draw the last-read marker under the row `id`, or remove it.
+    ///
+    /// The marker goes when its row does — trimmed, removed or cleared —
+    /// rather than jumping to a neighbour, since a marker in the wrong
+    /// place claims something was read that wasn't.
+    pub fn set_marker(&self, id: Option<MessageId>) {
+        self.imp_().marker.set(id);
+        self.queue_draw();
+    }
+
+    pub fn marker(&self) -> Option<MessageId> {
+        let id = self.imp_().marker.get()?;
+        // Trimmed rows leave the id behind; report what is drawn.
+        self.imp_().buffer.borrow().row_of(id).map(|_| id)
     }
 
     /// The scrollback cap in rows; 0 is no limit.
@@ -947,11 +1319,14 @@ impl HxChatView {
 
     pub fn clear(&self) {
         self.imp_().buffer.borrow_mut().clear();
+        self.imp_().marker.set(None);
+        self.clear_selection();
         // Textures are keyed by token, and tokens are per-conversation
         // and reused after a clear — holding stale ones would both leak
         // and let a new row show an old image.
         self.clear_media();
         self.after_content_change();
+        self.a11y_reset();
     }
 
     pub fn scroll_to_bottom(&self) {
@@ -1031,12 +1406,7 @@ impl HxChatView {
         match c {
             ColorRef::Default => self.pal(fallback),
             ColorRef::Palette(i) => self.pal(i as usize),
-            ColorRef::Rgb(v) => gtk4::gdk::RGBA::new(
-                ((v >> 16) & 0xff) as f32 / 255.0,
-                ((v >> 8) & 0xff) as f32 / 255.0,
-                (v & 0xff) as f32 / 255.0,
-                1.0,
-            ),
+            ColorRef::Rgb(v) => rgb(v),
         }
     }
 
@@ -1234,7 +1604,7 @@ impl HxChatView {
             // than under the code it belongs to.
             if let Some(msg) = buf.message_at(row) {
                 for (bi, blk) in msg.blocks.iter().enumerate() {
-                    if !matches!(blk, hxchat_layout::Block::Code { .. }) {
+                    if !matches!(blk, rotulus_layout::Block::Code { .. }) {
                         continue;
                     }
                     let src = LineSource::Block(bi);
@@ -1284,15 +1654,21 @@ impl HxChatView {
             // whichever frame happened to be current when the row was
             // appended.
             if let Some(av) = layout.avatar {
-                let tex = unsafe {
-                    hx_chat_avatar_for_uid(self.as_ptr() as *mut gtk4::ffi::GtkWidget, av.uid)
-                };
-                if !tex.is_null() {
-                    let tex: gtk4::gdk::Texture =
-                        unsafe { gtk4::glib::translate::from_glib_none(tex) };
+                let paintable = imp
+                    .avatar_func
+                    .borrow()
+                    .as_ref()
+                    .and_then(|f| f(self, av.key));
+                if let Some(p) = paintable {
                     // Fit inside the slot preserving aspect, so a banner-
-                    // shaped icon isn't stretched into a square.
-                    let (iw, ih) = (tex.width().max(1), tex.height().max(1));
+                    // shaped icon isn't stretched into a square. A
+                    // paintable with no intrinsic size fills the slot.
+                    let (iw, ih) = (p.intrinsic_width(), p.intrinsic_height());
+                    let (iw, ih) = if iw > 0 && ih > 0 {
+                        (iw, ih)
+                    } else {
+                        (av.size as i32, av.size as i32)
+                    };
                     let scale = (av.size as f64 / iw as f64).min(av.size as f64 / ih as f64);
                     let (dw, dh) = ((iw as f64 * scale).max(1.0), (ih as f64 * scale).max(1.0));
                     snapshot.save();
@@ -1300,7 +1676,7 @@ impl HxChatView {
                         av.x as f32,
                         (row_top + av.y as i64) as f32,
                     ));
-                    tex.snapshot(snapshot, dw, dh);
+                    p.snapshot(snapshot, dw, dh);
                     snapshot.restore();
                 }
             }
@@ -1316,17 +1692,16 @@ impl HxChatView {
                         None => continue,
                     },
                     LineSource::Block(bi) => match msg.blocks.get(bi) {
-                        Some(hxchat_layout::Block::Text(p)) => (p.text.as_str(), &p.spans),
-                        Some(hxchat_layout::Block::Quote { content, .. }) => {
+                        Some(rotulus_layout::Block::Text(p)) => (p.text.as_str(), &p.spans),
+                        Some(rotulus_layout::Block::Quote { content, .. }) => {
                             (content.text.as_str(), &content.spans)
                         }
-                        Some(hxchat_layout::Block::Code { text, .. }) => (text.as_str(), &[]),
+                        Some(rotulus_layout::Block::Code { text, .. }) => (text.as_str(), &[]),
                         // A decoded image paints as a texture; an
                         // undecoded one falls back to its placeholder
-                        // text, which is exactly the Phase 9.D
-                        // behaviour and what the user sees while the
+                        // text, which is what the user sees while the
                         // fetch is in flight.
-                        Some(hxchat_layout::Block::Image { alt, token, size }) => {
+                        Some(rotulus_layout::Block::Image { alt, token, size }) => {
                             // Borrowed, not cloned: this runs for every
                             // visible image on every snapshot, and an
                             // animated one snapshots at its frame rate.
@@ -1431,6 +1806,22 @@ impl HxChatView {
                     y as f32,
                 );
             }
+
+            // The last-read marker: a rule across the whole width under
+            // the row it names, drawn last so nothing in the row covers
+            // it.
+            if imp.marker.get().is_some() && imp.marker.get() == buf.id_at(row) {
+                let y = (row_top + i64::from(layout.height)) as f32 - MARKER_HEIGHT;
+                snapshot.append_color(
+                    &self.pal(PAL_MARKER),
+                    &gtk4::graphene::Rect::new(
+                        0.0,
+                        y,
+                        content_width(alloc_w) as f32,
+                        MARKER_HEIGHT,
+                    ),
+                );
+            }
         }
 
         snapshot.restore();
@@ -1460,7 +1851,7 @@ impl HxChatView {
         layout: &pango::Layout,
         slice: &str,
         slice_start: usize,
-        spans: &[hxchat_layout::Span],
+        spans: &[rotulus_layout::Span],
         hl: Option<(usize, usize)>,
         search: &[(usize, usize, bool)],
         hover: Option<(usize, usize)>,
@@ -1549,7 +1940,7 @@ impl HxChatView {
             }
             let style = if underline {
                 Style {
-                    attrs: style.attrs.union(hxchat_layout::Attrs::UNDERLINE),
+                    attrs: style.attrs.union(rotulus_layout::Attrs::UNDERLINE),
                     ..style
                 }
             } else {
@@ -1569,18 +1960,31 @@ impl HxChatView {
             // why the monospace attribute alone is not enough. Drawn
             // beneath any band, so a selected code span still reads as
             // selected.
-            if style.attrs.contains(hxchat_layout::Attrs::CODE) {
+            if style.attrs.contains(rotulus_layout::Attrs::CODE) {
                 let fgc = self.pal(PAL_FG);
                 let tint = gtk4::gdk::RGBA::new(fgc.red(), fgc.green(), fgc.blue(), CODE_BG_ALPHA);
                 snapshot.append_color(&tint, &gtk4::graphene::Rect::new(*x, y, w as f32, h as f32));
             }
+            // Reverse swaps the run's own colors. A background left to
+            // the system can't be read back to become the ink, so the ink
+            // is black or white, whichever the foreground isn't.
+            let (run_fg, run_bg) = {
+                let fg = self.resolve(style.fg, PAL_FG);
+                let bg = (style.bg != ColorRef::Default).then(|| self.resolve(style.bg, PAL_BG));
+                if style.attrs.contains(rotulus_layout::Attrs::REVERSE) {
+                    let ink = match bg.filter(|b| b.alpha() > 0.0) {
+                        Some(b) => b,
+                        None => contrast(&fg),
+                    };
+                    (ink, Some(fg))
+                } else {
+                    (fg, bg)
+                }
+            };
             if let Some(bg) = band_bg {
                 snapshot.append_color(&bg, &gtk4::graphene::Rect::new(*x, y, w as f32, h as f32));
-            } else if style.bg != ColorRef::Default {
-                snapshot.append_color(
-                    &self.resolve(style.bg, PAL_BG),
-                    &gtk4::graphene::Rect::new(*x, y, w as f32, h as f32),
-                );
+            } else if let Some(bg) = run_bg {
+                snapshot.append_color(&bg, &gtk4::graphene::Rect::new(*x, y, w as f32, h as f32));
             }
 
             // The search bands are fixed colours, so their ink is fixed
@@ -1590,7 +1994,7 @@ impl HxChatView {
                 Mark::Selection => mark_fg,
                 Mark::CurrentMatch => SEARCH_CURRENT_FG,
                 Mark::Match => SEARCH_MATCH_FG,
-                Mark::None => self.resolve(style.fg, PAL_FG),
+                Mark::None => run_fg,
             };
             snapshot.save();
             snapshot.translate(&gtk4::graphene::Point::new(*x, y));
@@ -1658,11 +2062,62 @@ pub fn plain_message(text: &str) -> Message {
     Message::system(ParsedText::plain(text))
 }
 
-impl HxChatView {
+impl RotulusView {
     /// Mark of the row carrying an image block with `token`.
     pub fn find_image(&self, token: u32) -> Option<MessageId> {
         self.imp_().buffer.borrow().find_image(token)
     }
+}
+
+/// Black or white, whichever reads against `c`.
+fn contrast(c: &gtk4::gdk::RGBA) -> gtk4::gdk::RGBA {
+    let light = 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue() > 0.5;
+    if light {
+        gtk4::gdk::RGBA::BLACK
+    } else {
+        gtk4::gdk::RGBA::WHITE
+    }
+}
+
+fn rgb(v: u32) -> gtk4::gdk::RGBA {
+    gtk4::gdk::RGBA::new(
+        ((v >> 16) & 0xff) as f32 / 255.0,
+        ((v >> 8) & 0xff) as f32 / 255.0,
+        (v & 0xff) as f32 / 255.0,
+        1.0,
+    )
+}
+
+/// The palette a view starts with: the mIRC colors, and every role
+/// following the system except the few that need a color of their own
+/// to be visible at all.
+pub fn default_palette() -> [gtk4::gdk::RGBA; PALETTE_COLS] {
+    // 0..15 are mIRC's standard sixteen; 16..31 carry on into its
+    // extended set, which is where they came from.
+    const MIRC: [u32; 32] = [
+        0xffffff, 0x000000, 0x00007f, 0x009300, 0xff0000, 0x7f0000, 0x9c009c, 0xfc7f00, 0xffff00,
+        0x00fc00, 0x009393, 0x00ffff, 0x0000fc, 0xff00ff, 0x7f7f7f, 0xd2d2d2, 0x470000, 0x472100,
+        0x474700, 0x324700, 0x004700, 0x00472c, 0x004747, 0x002747, 0x000047, 0x2e0047, 0x470047,
+        0x47002a, 0x740000, 0x743a00, 0x747400, 0x517400,
+    ];
+    // Adwaita's accent-adjacent hues, readable on light and dark.
+    const NICKS: [u32; 8] = [
+        0x1c71d8, 0x2ec27e, 0xe66100, 0x9141ac, 0xc01c28, 0x0a8e8e, 0x986a44, 0xe5a50a,
+    ];
+    let follow = gtk4::gdk::RGBA::new(0.0, 0.0, 0.0, 0.0);
+    let mut p = [follow; PALETTE_COLS];
+    for (dst, v) in p.iter_mut().zip(MIRC) {
+        *dst = rgb(v);
+    }
+    let gray = gtk4::gdk::RGBA::new(0.5, 0.5, 0.5, 1.0);
+    p[PAL_MARK_BG] = gtk4::gdk::RGBA::new(0.208, 0.518, 0.894, 0.35);
+    p[PAL_MARKER] = rgb(0xe01b24);
+    p[PAL_HISTORY_MUTED] = gray;
+    p[PAL_TIMESTAMP] = gray;
+    for (i, v) in NICKS.iter().enumerate() {
+        p[PAL_NICK_COLOR0 + i] = rgb(*v);
+    }
+    p
 }
 
 /// Usable content width for a given allocation.
@@ -1697,7 +2152,7 @@ fn format_stamp(unix: i64, format: &str) -> Option<String> {
 
 // ---- selection ------------------------------------------------------
 
-impl HxChatView {
+impl RotulusView {
     /// Drag-to-select, click-to-clear, and Ctrl+C.
     /// Widget-space x of the drawn separator rule, if one is drawn.
     ///
@@ -1770,8 +2225,7 @@ impl HxChatView {
         // these closures is owned by a controller that the view itself owns,
         // so a strong clone closes a view → controller → closure → view cycle
         // and the view can never reach refcount zero — it and its whole
-        // message buffer outlive the window. `gtkhx-ui`'s user list documents
-        // the same hazard at its own `connect_activate`.
+        // message buffer outlive the window.
         //
         // An upgrade failure is unreachable in practice: the controller cannot
         // outlive the widget that owns it, so the closure cannot run after the
@@ -1831,7 +2285,7 @@ impl HxChatView {
                 // selection at the press point and drop whatever a
                 // previous gesture had selected.
                 let start = *this.imp_().drag_start.borrow();
-                *this.imp_().selection.borrow_mut() = start.map(|c| Selection::new(c, c));
+                this.set_selection(start.map(|c| Selection::new(c, c)));
                 trace_clicks(|| "drag_update: first motion".to_string());
             }
             let (px, py) = (sx + dx, sy + dy);
@@ -1851,11 +2305,11 @@ impl HxChatView {
             }
             this.imp_().selecting.set(false);
             this.sync_autoscroll();
-            // Drag-end autocopy, matching xtext's behaviour and driven
-            // by the same three prefs (see set_autocopy_* on the C side).
+            // Drag-end autocopy, as xtext did it (the `autocopy`
+            // property).
             // Only for a real drag: a bare click selects nothing, and a
             // multi-click does its own copy in the press handler.
-            if this.imp_().drag_moved.get() && autocopy_enabled() {
+            if this.imp_().drag_moved.get() && this.imp_().autocopy.get() {
                 // Both clipboards, matching xtext's autocopy: it took
                 // clipboard ownership on drag-end
                 // (gtk_xtext_set_clip_owner), and PRIMARY is what
@@ -1872,6 +2326,25 @@ impl HxChatView {
         // every text view does and what makes "click to dismiss" work.
         let click = gtk4::GestureClick::new();
         click.set_button(gtk4::gdk::BUTTON_PRIMARY);
+        // Primary-click activation: a link, a speaker, a load-more row,
+        // an image. On release, and only when no drag happened, so
+        // selecting text doesn't also activate whatever was under the
+        // press — and not when the click is dismissing a selection.
+        //
+        // Connected first: handlers run in connection order, and the one
+        // below clears the selection, after which this one could no
+        // longer tell a dismissing click from an ordinary one.
+        let this = self.downgrade();
+        click.connect_released(move |_, n_press, x, y| {
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            if n_press != 1 || this.imp_().drag_moved.get() || this.has_selection() {
+                return;
+            }
+            this.activate_at(x, y);
+        });
+
         let this = self.downgrade();
         click.connect_released(move |_, n_press, _, _| {
             let Some(this) = this.upgrade() else {
@@ -1894,10 +2367,7 @@ impl HxChatView {
             if n_press != 1 || this.imp_().drag_moved.get() {
                 return;
             }
-            if this.imp_().selection.borrow().is_some() {
-                *this.imp_().selection.borrow_mut() = None;
-                this.queue_draw();
-            }
+            this.clear_selection();
         });
         // Double- and triple-click select a word and a line, as xtext
         // does. Handled on `pressed` rather than `released` so the drag
@@ -1925,38 +2395,24 @@ impl HxChatView {
             };
             trace_clicks(|| format!("multi-click n={n_press} -> sel={}", sel.is_some()));
             if let Some(sel) = sel {
-                *this.imp_().selection.borrow_mut() = Some(sel);
+                this.set_selection(Some(sel));
                 // A multi-click is not a drag: stop the drag handler
                 // from overwriting the focus on the next motion.
                 this.imp_().selecting.set(false);
                 this.imp_().drag_moved.set(false);
                 this.queue_draw();
-                if autocopy_enabled() {
+                if this.imp_().autocopy.get() {
                     this.copy_selection_to(ClipboardTarget::Primary);
                 }
             }
         });
 
-        // Primary-click word-click, for the handlers that filter on it
-        // (chat-history's sentinel and inline media). Emitted on
-        // release, and only when no drag happened, so selecting text
-        // doesn't also activate whatever was under the press.
-        let this = self.downgrade();
-        click.connect_released(move |g, n_press, x, y| {
-            let Some(this) = this.upgrade() else {
-                return;
-            };
-            if n_press != 1 || this.has_selection() {
-                return;
-            }
-            this.emit_word_click(x, y, g.current_event().as_ref());
-        });
         self.add_controller(click);
 
         // Ctrl+C.
         //
         // A ShortcutController on this widget does not work, global
-        // scope or not: `chat.c` calls gtk_widget_set_can_focus(FALSE)
+        // scope or not: a chat application makes the view unfocusable
         // so typing goes to the input, the input is a GtkTextView with
         // its own Ctrl+C binding, and being the focused widget it
         // consumes the key first — copying its own (empty) selection.
@@ -2021,9 +2477,8 @@ impl HxChatView {
     /// `gtk_widget_set_can_focus(FALSE)` on the chat view so the message
     /// input keeps focus — and GtkTextView binds Page_Up/Page_Down to
     /// its own cursor movement, so a global-scope GtkShortcut (which
-    /// runs *after* normal propagation) would never fire. That is why
-    /// paging has never worked in GtkHx: nothing in the tree ever bound
-    /// it, and the widget that had focus swallowed it.
+    /// runs *after* normal propagation) would never fire: the widget that
+    /// has focus swallows it.
     ///
     /// The steal is narrow on purpose. It only applies when focus is in
     /// a text-entry widget — the message input or the subject entry,
@@ -2201,7 +2656,7 @@ impl HxChatView {
             return String::new();
         };
         let buf = imp.buffer.borrow();
-        if !prefs::AUTOCOPY_STAMP.with(|c| c.get()) {
+        if !imp.copy_timestamps.get() {
             return buf.selected_text(&s);
         }
         // Per *row*, not per output line.
@@ -2239,8 +2694,26 @@ impl HxChatView {
 
     pub fn clear_selection(&self) {
         if self.imp_().selection.borrow().is_some() {
-            *self.imp_().selection.borrow_mut() = None;
-            self.queue_draw();
+            self.set_selection(None);
+        }
+    }
+
+    /// Install `sel` as the selection, telling anyone listening.
+    ///
+    /// Every change goes through here, so `selection-changed` and the
+    /// `has-selection` notification cannot miss one.
+    fn set_selection(&self, sel: Option<Selection>) {
+        let had = self.has_selection();
+        *self.imp_().selection.borrow_mut() = sel;
+        self.selection_changed(had);
+    }
+
+    fn selection_changed(&self, had: bool) {
+        self.queue_draw();
+        self.a11y_selection_changed();
+        self.emit_by_name::<()>("selection-changed", &[]);
+        if had != self.has_selection() {
+            self.notify("has-selection");
         }
     }
 
@@ -2271,39 +2744,7 @@ enum ClipboardTarget {
     Clipboard,
 }
 
-/// Process-wide prefs, mirroring the ones xtext keeps as module globals.
-///
-/// These are genuinely process-wide rather than per-view — `options.c`
-/// sets them once from the loaded settings, and `prefs_read` applies the
-/// stamp format before any window exists — so the view crate keeps them the
-/// same way. `thread_local` rather than a lock because every one of
-/// these is touched only from the GTK main thread.
-pub(crate) mod prefs {
-    use std::cell::{Cell, RefCell};
-
-    thread_local! {
-        /// Drag-end copies to the clipboards. xtext's default is on.
-        pub static AUTOCOPY_TEXT: Cell<bool> = const { Cell::new(true) };
-        /// Include the timestamp column in copied text.
-        pub static AUTOCOPY_STAMP: Cell<bool> = const { Cell::new(false) };
-        /// Retain colour codes in copied text. Meaningless here — the
-        /// new backend copies plain text — but accepted so the pref
-        /// round-trips rather than erroring.
-        pub static AUTOCOPY_COLOR: Cell<bool> = const { Cell::new(false) };
-        /// The persisted stamp format, applied by `prefs_read` before
-        /// any view exists. Views read it at construction; without this
-        /// they would silently keep the built-in default and ignore the
-        /// user's pref until they next edited it in Settings.
-        pub static STAMP_FORMAT: RefCell<Option<String>> = const { RefCell::new(None) };
-    }
-}
-
-/// Whether drag-end should copy. Driven by `CFG_AUTOCOPY_TEXT`.
-fn autocopy_enabled() -> bool {
-    prefs::AUTOCOPY_TEXT.with(|c| c.get())
-}
-
-// ---- zoom (scoping §3.7) --------------------------------------------
+// ---- zoom -------------------------------------------------------------
 
 /// Zoom steps, per-mille. The browser/terminal ladder people already
 /// have muscle memory for.
@@ -2311,7 +2752,7 @@ const ZOOM_STEPS: [u32; 13] = [
     500, 670, 800, 900, 1000, 1100, 1250, 1500, 1750, 2000, 2500, 3000, 4000,
 ];
 
-impl HxChatView {
+impl RotulusView {
     fn install_zoom_bindings(&self) {
         // Ctrl + scroll.
         let scroll = gtk4::EventControllerScroll::new(gtk4::EventControllerScrollFlags::VERTICAL);
@@ -2422,8 +2863,22 @@ impl HxChatView {
 
 // ---- links and the context menu -------------------------------------
 
-impl HxChatView {
+impl RotulusView {
     fn install_link_handlers(&self) {
+        // Where a link goes, on hover. For a markdown link whose label is
+        // not its address, the only way to see the destination short of
+        // the menu.
+        self.set_has_tooltip(true);
+        self.connect_query_tooltip(|view, x, y, _keyboard, tooltip| {
+            match view.hover_target_at(f64::from(x), f64::from(y)) {
+                Some(HoverTarget::Link { href, .. }) => {
+                    tooltip.set_text(Some(&href));
+                    true
+                }
+                _ => false,
+            }
+        });
+
         // Hover: pointer cursor over a link, default elsewhere.
         let motion = gtk4::EventControllerMotion::new();
         let this = self.downgrade();
@@ -2448,9 +2903,15 @@ impl HxChatView {
                 this.queue_draw();
             }
 
+            // The pointer hand promises a click does something; a link
+            // with activation off only has its menu, like any text.
+            let clickable = match &target {
+                Some(HoverTarget::Link { .. }) => this.imp_().activate_links.get(),
+                other => other.is_some(),
+            };
             let want = if on_sep {
                 "col-resize"
-            } else if target.is_some() {
+            } else if clickable {
                 "pointer"
             } else {
                 "text"
@@ -2474,77 +2935,37 @@ impl HxChatView {
         });
         self.add_controller(motion);
 
-        // Secondary / middle click: the URL menu if over a link, our own
-        // context menu otherwise.
-        //
-        // Matching xtext's split exactly (`gtkurl_xtext_word_click`
-        // filters out left-click and hands everything else to
-        // gtkurl_show_popup), so the two backends agree about which
-        // button does what.
+        // Secondary / middle click: a person's menu over a nick, the link
+        // menu over a link, our own context menu otherwise.
         for button in [gtk4::gdk::BUTTON_SECONDARY, gtk4::gdk::BUTTON_MIDDLE] {
             let click = gtk4::GestureClick::new();
             click.set_button(button);
             let this = self.downgrade();
-            click.connect_pressed(move |g, _, x, y| {
+            click.connect_pressed(move |_, _, x, y| {
                 let Some(this) = this.upgrade() else {
                     return;
                 };
-                // word-click first: gtkurl's handler filters on
-                // secondary/middle and pops the URL menu itself, and the
-                // media handler wants the token. Emitting keeps every
-                // existing C consumer working.
-                // A nick outranks everything: the gutter is where nicks
-                // live, and the user menu is what a right-click there
-                // means. Handled before word-click emission so the URL
-                // handler can't also fire on a URL-shaped nick.
-                if button == gtk4::gdk::BUTTON_SECONDARY {
-                    if let Some(HoverTarget::Nick { uid, .. }) = this.hover_target_at(x, y) {
-                        this.emit_speaker_menu(uid, x, y);
-                        return;
+                match this.hover_target_at(x, y) {
+                    // A nick outranks everything: the gutter is where nicks
+                    // live, and the person's menu is what a right-click
+                    // there means.
+                    Some(HoverTarget::Nick { key, .. })
+                        if button == gtk4::gdk::BUTTON_SECONDARY =>
+                    {
+                        this.emit_by_name::<()>("speaker-menu", &[&key, &x, &y]);
                     }
-                }
-
-                this.emit_word_click(x, y, g.current_event().as_ref());
-
-                match this.link_at_point(x, y) {
-                    // Only pop our own URL menu for links *we* detected
-                    // but gtkurl's word tokenisation didn't — otherwise
-                    // the emission above already popped one and we'd
-                    // stack two.
-                    Some((href, _label)) if !this.word_is_url(x, y) => {
-                        // gtkurl_show_popup documents its (x, y) as
-                        // toplevel-root-relative and does no translation
-                        // of its own — the xtext caller fed it
-                        // gdk_event_get_position, which is surface- (so
-                        // root-) local. These are gesture coordinates,
-                        // i.e. widget-local, so they need converting or
-                        // the popup lands off by the view's offset
-                        // within the window.
-                        let (_, rx, ry) = this.point_in_root(x, y);
-                        crate::links::show_url_popup(&this, &href, rx, ry);
+                    Some(HoverTarget::Link { href, .. }) => {
+                        let handled: bool = this.emit_by_name("link-menu", &[&href, &x, &y]);
+                        if !handled {
+                            this.show_link_menu(&href, x, y);
+                        }
                     }
-                    Some(_) => {}
-                    None if button == gtk4::gdk::BUTTON_SECONDARY => {
-                        this.show_context_menu(x, y);
-                    }
-                    None => {}
+                    _ if button == gtk4::gdk::BUTTON_SECONDARY => this.show_context_menu(x, y),
+                    _ => {}
                 }
             });
             self.add_controller(click);
         }
-    }
-
-    /// The link under a widget-space point, as (href, visible label).
-    /// Ask the C side for the user context menu on `uid`.
-    ///
-    /// A signal rather than a direct call, because the menu is built by
-    /// `users.c::user_popup_show` — the *same* builder the Users window
-    /// and the pchat sidebars use. The view has no business knowing what
-    /// is on that menu (Get Info, Send Message, Kick, the voice volume
-    /// slider, whatever is added next); it knows a uid and where the
-    /// pointer was.
-    fn emit_speaker_menu(&self, uid: u16, x: f64, y: f64) {
-        self.emit_by_name::<()>("speaker-menu", &[&(uid as u32), &x, &y]);
     }
 
     /// What the pointer is over, if it is activatable.
@@ -2552,7 +2973,7 @@ impl HxChatView {
     /// A nick takes precedence over a link inside it, since the gutter
     /// is where nicks live and a URL-shaped nick is a curiosity rather
     /// than something you want to open.
-    fn hover_target_at(&self, x: f64, y: f64) -> Option<HoverTarget> {
+    pub(crate) fn hover_target_at(&self, x: f64, y: f64) -> Option<HoverTarget> {
         // The avatar first: it is painted from the layout's avatar box
         // rather than from a line box, so the caret hit-test below cannot
         // see it. Clicking someone's icon should mean the same thing as
@@ -2564,33 +2985,97 @@ impl HxChatView {
             let cx = (x as i32) - PAD_X;
             let cy = ((y as i32) - PAD_Y).max(0) as u64 + scroll;
             // One borrow, released before anything else touches the
-            // buffer. The first cut chained a borrow() inside an
-            // and_then() on a live borrow_mut(), which is a RefCell
-            // panic the moment the pointer crosses an icon.
+            // buffer. Chaining a borrow() inside an and_then() on a live
+            // borrow_mut() is a RefCell panic the moment the pointer
+            // crosses an icon.
             let hit = imp.buffer.borrow_mut().avatar_at(cx, cy);
-            if let Some((message, uid)) = hit {
-                return Some(HoverTarget::Nick { message, uid });
+            if let Some((message, key)) = hit {
+                return Some(HoverTarget::Nick { message, key });
             }
         }
 
         let caret = self.caret_at(x, y)?;
         let buf = self.imp_().buffer.borrow();
-        if caret.source == LineSource::Gutter {
-            if let Some(sp) = buf.speaker_of(caret.message) {
-                if sp.uid != 0 {
-                    return Some(HoverTarget::Nick {
-                        message: caret.message,
-                        uid: sp.uid,
-                    });
-                }
-            }
-            return None;
+        let msg = buf.message(caret.message)?;
+        // The whole of a load-more row is its button.
+        if let rotulus_layout::MessageKind::LoadMore(d) = msg.kind {
+            return Some(HoverTarget::LoadMore {
+                message: caret.message,
+                direction: d.into(),
+            });
         }
-        buf.link_range_at(&caret).map(|range| HoverTarget::Link {
+        if caret.source == LineSource::Gutter {
+            return match buf.speaker_of(caret.message) {
+                Some(sp) if sp.key != 0 => Some(HoverTarget::Nick {
+                    message: caret.message,
+                    key: sp.key,
+                }),
+                _ => None,
+            };
+        }
+        if let LineSource::Block(bi) = caret.source {
+            if let Some(rotulus_layout::Block::Image { token, .. }) = msg.blocks.get(bi) {
+                return Some(HoverTarget::Media {
+                    message: caret.message,
+                    token: *token,
+                });
+            }
+        }
+        let range = buf.link_range_at(&caret)?;
+        let (href, _) = buf.link_at(&caret)?;
+        let shown = buf
+            .source_text(buf.row_of(caret.message)?, caret.source)
+            .and_then(|t| t.get(range.clone()))
+            .unwrap_or("");
+        let disguised = self.imp_().linkifier.borrow().normalize(shown) != href;
+        Some(HoverTarget::Link {
             message: caret.message,
             source: caret.source,
             range,
+            href,
+            disguised,
         })
+    }
+
+    /// Act on a primary click at a widget-space point.
+    pub(crate) fn activate_at(&self, x: f64, y: f64) {
+        match self.hover_target_at(x, y) {
+            Some(HoverTarget::Link { .. }) if !self.imp_().activate_links.get() => {}
+            // A link whose text isn't its address shows where it goes
+            // before anything opens: the menu, headed by the real URL.
+            Some(HoverTarget::Link {
+                href,
+                disguised: true,
+                ..
+            }) => {
+                let handled: bool = self.emit_by_name("link-menu", &[&href, &x, &y]);
+                if !handled {
+                    self.show_link_menu(&href, x, y);
+                }
+            }
+            Some(HoverTarget::Link { href, .. }) => {
+                let handled: bool = self.emit_by_name("link-activated", &[&href]);
+                if !handled {
+                    self.open_link(&href);
+                }
+            }
+            Some(HoverTarget::Nick { key, .. }) => {
+                self.emit_by_name::<()>("speaker-activated", &[&key]);
+            }
+            Some(HoverTarget::LoadMore { direction, .. }) => {
+                self.emit_by_name::<()>("load-more", &[&direction]);
+            }
+            Some(HoverTarget::Media { token, .. }) => {
+                self.emit_by_name::<()>("media-activated", &[&token]);
+            }
+            None => {}
+        }
+    }
+
+    /// Open a link with the desktop's handler for it.
+    fn open_link(&self, href: &str) {
+        let parent = self.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
+        gtk4::UriLauncher::new(href).launch(parent.as_ref(), gtk4::gio::Cancellable::NONE, |_| {});
     }
 
     /// The byte range this line should underline, if the hovered target
@@ -2608,16 +3093,17 @@ impl HxChatView {
                 }
                 self.imp_().buffer.borrow().gutter_range(row_id)
             }
+            HoverTarget::LoadMore { message, .. } => {
+                if *message != row_id || source == LineSource::Gutter {
+                    return None;
+                }
+                Some(0..usize::MAX)
+            }
             t => {
                 let (m, s, r) = t.underline()?;
                 (m == row_id && s == source).then_some(r)
             }
         }
-    }
-
-    fn link_at_point(&self, x: f64, y: f64) -> Option<(String, String)> {
-        let caret = self.caret_at(x, y)?;
-        self.imp_().buffer.borrow().link_at(&caret)
     }
 
     /// Translate a widget-local point into root (toplevel) coordinates.
@@ -2641,28 +3127,80 @@ impl HxChatView {
     ///
     /// A bare `GtkPopover` of buttons rather than a `GtkPopoverMenu`
     /// driven by a `GActionGroup`, and parented to the *root* rather
-    /// than to the view. Both of those are deliberate, and both are
-    /// settled questions elsewhere in this tree — this menu was the last
-    /// one that had not caught up:
+    /// than to the view. Both are deliberate:
     ///
-    /// * `users.c::user_popup_show` notes that its `GActionEntry` table
-    ///   "is gone — the bare-popover rewrite invokes the on_user_*
-    ///   handlers directly". A menu item's action is resolved by walking
-    ///   the widget hierarchy for a group, which makes whether the item
-    ///   works depend on when the popover was parented relative to when
-    ///   its model was built, and fails silently when it goes wrong. A
+    /// * A menu item's action is resolved by walking the widget
+    ///   hierarchy for a group, which makes whether the item works
+    ///   depend on when the popover was parented relative to when its
+    ///   model was built, and fails silently when it goes wrong. A
     ///   direct `clicked` callback cannot miss.
-    /// * `gtkurl.c::gtkurl_show_popup` parents to the root because
-    ///   anchoring a grabbing popover to a widget nested inside a
+    /// * Anchoring a grabbing popover to a widget nested inside a
     ///   scrolled window trips GDK's "Tried to map a grabbing popup with
     ///   a non-top most parent", after which click-outside-to-dismiss
-    ///   breaks and Escape leaks the grab. The chat view is exactly such
-    ///   a widget.
-    ///
-    /// Which of the two was making Select All do nothing is not settled
-    /// — but both are real, and this shape has worked twice in this tree
-    /// for years.
+    ///   breaks and Escape leaks the grab. A chat view is exactly such a
+    ///   widget.
     fn show_context_menu(&self, x: f64, y: f64) {
+        // Copy is greyed with nothing selected, rather than silently
+        // doing nothing.
+        let copy_enabled = self.has_selection();
+        let this = self.downgrade();
+        let copy = move || {
+            if let Some(this) = this.upgrade() {
+                this.copy_selection_to(ClipboardTarget::Clipboard);
+            }
+        };
+        let this = self.downgrade();
+        let select_all = move || {
+            if let Some(this) = this.upgrade() {
+                this.select_all();
+            }
+        };
+        self.popup_menu(
+            x,
+            y,
+            vec![
+                (crate::tr("Copy"), copy_enabled, Box::new(copy)),
+                (crate::tr("Select All"), true, Box::new(select_all)),
+            ],
+        );
+    }
+
+    /// The menu for a link nobody handled `link-menu` for.
+    fn show_link_menu(&self, href: &str, x: f64, y: f64) {
+        let this = self.downgrade();
+        let url = href.to_string();
+        let open = move || {
+            if let Some(this) = this.upgrade() {
+                this.open_link(&url);
+            }
+        };
+        let this = self.downgrade();
+        let url = href.to_string();
+        let copy = move || {
+            if let Some(this) = this.upgrade() {
+                WidgetExt::display(&this).clipboard().set_text(&url);
+            }
+        };
+        self.popup_menu_titled(
+            Some(href),
+            x,
+            y,
+            vec![
+                (crate::tr("Open Link in Browser"), true, Box::new(open)),
+                (crate::tr("Copy Link"), true, Box::new(copy)),
+            ],
+        );
+    }
+
+    /// Pop a menu of `(label, enabled, action)` rows at a widget-space
+    /// point.
+    fn popup_menu(&self, x: f64, y: f64, rows: Vec<MenuRow>) {
+        self.popup_menu_titled(None, x, y, rows);
+    }
+
+    /// [`Self::popup_menu`], headed by `title` — for a link, the address
+    /// it goes to, so the reader sees it before choosing.
+    fn popup_menu_titled(&self, title: Option<&str>, x: f64, y: f64, rows: Vec<MenuRow>) {
         let (parent, px, py) = self.point_in_root(x, y);
 
         let popover = gtk4::Popover::new();
@@ -2681,41 +3219,32 @@ impl HxChatView {
         }
         popover.set_child(Some(&vbox));
 
-        // Copy is greyed with nothing selected, rather than silently
-        // doing nothing — which is what Select All was doing.
-        let copy = menu_row(&crate::tr("Copy"), self.has_selection());
-        {
-            // Weak on both counts: the button owns this closure and the
-            // popover owns the button, so a strong ref to either the popover
-            // or the view is a cycle that outlives the unparent and leaks the
-            // view with it.
-            let this = self.downgrade();
-            let weak = popover.downgrade();
-            copy.connect_clicked(move |_| {
-                if let Some(this) = this.upgrade() {
-                    this.copy_selection_to(ClipboardTarget::Clipboard);
-                }
-                if let Some(p) = weak.upgrade() {
-                    p.popdown();
-                }
-            });
+        if let Some(t) = title {
+            let header = gtk4::Label::new(Some(t));
+            header.set_ellipsize(pango::EllipsizeMode::Middle);
+            header.set_max_width_chars(48);
+            header.set_xalign(0.0);
+            header.add_css_class("dim-label");
+            header.set_margin_start(10);
+            header.set_margin_end(10);
+            header.set_margin_bottom(4);
+            vbox.append(&header);
         }
-        vbox.append(&copy);
 
-        let select_all = menu_row(&crate::tr("Select All"), true);
-        {
-            let this = self.downgrade();
+        for (label, enabled, action) in rows {
+            let row = menu_row(&label, enabled);
+            // Weak: the button owns this closure and the popover owns the
+            // button, so a strong ref to the popover is a cycle that
+            // outlives the unparent and leaks it.
             let weak = popover.downgrade();
-            select_all.connect_clicked(move |_| {
-                if let Some(this) = this.upgrade() {
-                    this.select_all();
-                }
+            row.connect_clicked(move |_| {
+                action();
                 if let Some(p) = weak.upgrade() {
                     p.popdown();
                 }
             });
+            vbox.append(&row);
         }
-        vbox.append(&select_all);
 
         popover.set_parent(&parent);
         // The popover owns itself: unparent on close, or it leaks and
@@ -2736,15 +3265,45 @@ impl HxChatView {
         if sel.is_none() {
             return;
         }
-        *imp.selection.borrow_mut() = sel;
-        self.queue_draw();
+        self.set_selection(sel);
     }
 }
 
-/// One row of a bare-popover menu, matching
-/// `users.c::user_popup_append_button` — which is the working reference
-/// for this shape, so the two menus in the chat view look like each
-/// other.
+/// A context-menu row: its label, whether it is enabled, and what it does.
+type MenuRow = (String, bool, Box<dyn Fn()>);
+
+/// The `:hover` background for menu rows, installed once on the default
+/// display. Adwaita's flat-button hover is too subtle to track a pointer
+/// against.
+fn install_menu_css() {
+    use std::cell::Cell;
+    thread_local! {
+        static INSTALLED: Cell<bool> = const { Cell::new(false) };
+    }
+    if INSTALLED.with(|i| i.replace(true)) {
+        return;
+    }
+    let Some(display) = gtk4::gdk::Display::default() else {
+        INSTALLED.with(|i| i.set(false));
+        return;
+    };
+    const CSS: &str = ".rotulus-menu-item { padding: 4px 10px; } \
+                       .rotulus-menu-item:hover { background-color: alpha(currentColor, 0.10); }";
+    let provider = gtk4::CssProvider::new();
+    // load_from_data is deprecated from 4.12, and its replacement doesn't
+    // exist before it.
+    #[cfg(feature = "v4_14")]
+    provider.load_from_string(CSS);
+    #[cfg(not(feature = "v4_14"))]
+    provider.load_from_data(CSS);
+    gtk4::style_context_add_provider_for_display(
+        &display,
+        &provider,
+        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+}
+
+/// One row of a bare-popover menu.
 ///
 /// The label needs **both** `xalign(0)` and `hexpand`. `xalign` places
 /// the text within the label's own allocation; without `hexpand` the
@@ -2757,14 +3316,11 @@ impl HxChatView {
 /// reads as "this item is hovered" and then fails to follow the
 /// pointer. These menus are pointer-driven — right-click, click.
 fn menu_row(label: &str, enabled: bool) -> gtk4::Button {
-    // The :hover background lives on this class, installed once by the
-    // C side. Adwaita's flat-button hover is too subtle to track a
-    // pointer against.
-    unsafe { hx_popup_item_install_css() };
+    install_menu_css();
 
     let b = gtk4::Button::with_label(label);
     b.add_css_class("flat");
-    b.add_css_class("gtkhx-popup-item");
+    b.add_css_class("rotulus-menu-item");
     b.set_has_frame(false);
     b.set_halign(gtk4::Align::Fill);
     b.set_sensitive(enabled);
@@ -2777,64 +3333,9 @@ fn menu_row(label: &str, enabled: bool) -> gtk4::Button {
     b
 }
 
-// ---- word-click (xtext parity) --------------------------------------
+// ---- inline media -----------------------------------------------------
 
-impl HxChatView {
-    /// Emit `word-click` for the word under a widget-space point.
-    ///
-    /// The word is handed over as a raw `char *` because that is what
-    /// xtext's signal signature is and what the C handlers expect. The
-    /// `CString` lives for the duration of the emission and no longer —
-    /// every handler in the tree either compares it or copies out of it
-    /// synchronously, which is the same contract xtext offered (its
-    /// pointer was into a scratch buffer reused on the next click).
-    fn emit_word_click(&self, x: f64, y: f64, event: Option<&gtk4::gdk::Event>) {
-        let Some(caret) = self.caret_at(x, y) else {
-            return;
-        };
-        let Some(word) = self.imp_().buffer.borrow().word_at(&caret) else {
-            return;
-        };
-        let Ok(c_word) = std::ffi::CString::new(word) else {
-            return;
-        };
-        let word_ptr = c_word.as_ptr() as glib::ffi::gpointer;
-        let event_ptr = event
-            .map(|e| {
-                use gtk4::glib::translate::ToGlibPtr;
-                let p: *mut gtk4::gdk::ffi::GdkEvent = e.to_glib_none().0;
-                p as glib::ffi::gpointer
-            })
-            .unwrap_or(std::ptr::null_mut());
-        self.emit_by_name::<()>("word-click", &[&word_ptr, &event_ptr]);
-    }
-}
-
-impl HxChatView {
-    /// Whether the word under the point is one `gtkurl` would itself
-    /// recognise — i.e. whether the `word-click` emission has already
-    /// caused a URL menu to pop.
-    ///
-    /// Needed because two detectors are in play: `gtkurl_scan`, which
-    /// finds URLs inside a line and gives us the link spans, and
-    /// `gtkurl_is_url`, which classifies a whitespace-delimited *word*
-    /// and is what the signal handler uses. They mostly agree; where
-    /// they don't, this stops us stacking a second popover on top of
-    /// the one the handler already opened.
-    fn word_is_url(&self, x: f64, y: f64) -> bool {
-        let Some(caret) = self.caret_at(x, y) else {
-            return false;
-        };
-        let Some(word) = self.imp_().buffer.borrow().word_at(&caret) else {
-            return false;
-        };
-        crate::links::word_is_url(&word)
-    }
-}
-
-// ---- inline media (C4) ----------------------------------------------
-
-impl HxChatView {
+impl RotulusView {
     /// Install (or replace) the decoded frames for a media token, and
     /// resize the row to match.
     ///
@@ -2969,37 +3470,30 @@ impl HxChatView {
     }
 }
 
-impl HxChatView {
+impl RotulusView {
     /// The media token on the image block a mark names.
     pub fn image_token_of(&self, id: MessageId) -> Option<u32> {
         let buf = self.imp_().buffer.borrow();
         let msg = buf.message(id)?;
         msg.blocks.iter().find_map(|b| match b {
-            hxchat_layout::Block::Image { token, .. } => Some(*token),
+            rotulus_layout::Block::Image { token, .. } => Some(*token),
             _ => None,
         })
     }
 }
 
-/// `GTKHX_CHATVIEW_TRACE=selection` turns on a per-line dump of what the
-/// snapshot pass thinks is selected.
+/// `ROTULUS_TRACE=clicks` — press counts and drag transitions, for a
+/// click-handling bug that only shows on someone else's machine: one run
+/// says whether GTK is delivering `n_press >= 2` at all.
 ///
-/// Added because selection state spans three layers — gesture, model,
+/// `ROTULUS_TRACE=selection` dumps what the paint pass thinks is
+/// selected, per line. Selection spans three layers — gesture, model,
 /// renderer — and static reading cannot tell which one is empty-handed.
-/// The equivalent trick (a `g_message` reporting what was actually
-/// constructed) is what identified the C2 floating-reference bug after
-/// several wrong guesses.
-/// `GTKHX_CHATVIEW_TRACE=clicks` — press counts and drag transitions.
-///
-/// Here because the sandbox this was developed in has no display, so a
-/// click-handling bug can only be observed on the user's machine. One
-/// run with this on says whether GTK is delivering `n_press >= 2` at
-/// all, which is the fork in the road for any further diagnosis.
 fn trace_clicks(msg: impl FnOnce() -> String) {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
     let on = *ON.get_or_init(|| {
-        std::env::var("GTKHX_CHATVIEW_TRACE")
+        std::env::var("ROTULUS_TRACE")
             .map(|v| v.split(',').any(|p| p.trim() == "clicks"))
             .unwrap_or(false)
     });
@@ -3012,7 +3506,7 @@ fn trace_selection() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
-        std::env::var("GTKHX_CHATVIEW_TRACE")
+        std::env::var("ROTULUS_TRACE")
             .map(|v| v.split(',').any(|p| p.trim() == "selection"))
             .unwrap_or(false)
     })
@@ -3026,18 +3520,23 @@ fn trace_selection() -> bool {
 const AUTOSCROLL_MAX_PPS: f64 = 1200.0;
 const AUTOSCROLL_FULL_AT: f64 = 120.0;
 
-impl HxChatView {
+impl RotulusView {
     /// Extend the live selection to a widget-space point.
     fn extend_selection_to(&self, x: f64, y: f64) {
         let Some(focus) = self.caret_at(x, y) else {
             return;
         };
+        let had = self.has_selection();
         let mut sel = self.imp_().selection.borrow_mut();
-        if let Some(s) = sel.as_mut() {
-            s.focus = focus;
+        let Some(s) = sel.as_mut() else {
+            return;
+        };
+        if s.focus == focus {
+            return;
         }
+        s.focus = focus;
         drop(sel);
-        self.queue_draw();
+        self.selection_changed(had);
     }
 
     /// How far outside the viewport the drag pointer is, in pixels.
@@ -3084,7 +3583,7 @@ impl HxChatView {
             // invalidated. Dropping a TickCallbackId is inert (gtk4-rs
             // has no Drop impl for it — removal is the explicit
             // `remove()`), so taking it here is exactly right.
-            let stop = |view: &HxChatView| {
+            let stop = |view: &RotulusView| {
                 *view.imp_().autoscroll_tick.borrow_mut() = None;
                 glib::ControlFlow::Break
             };

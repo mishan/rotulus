@@ -1,10 +1,9 @@
-//! The GtkHx chat layout engine — chat-view phase C1.
+//! The layout engine behind the Rotulus chat view.
 //!
 //! Everything between "a message arrives" and "the view knows what
 //! pixels to put where", with no GTK, no GLib and no Pango, so all of it
 //! runs under `cargo test` on display-less CI. The widget that consumes
-//! it is C2 (`hxchat-view`); see docs/chat-view.md for the whole
-//! plan and the phasing.
+//! it is `rotulus`; see docs/chat-view.md.
 //!
 //! ```text
 //!   Message  ──parse──▶  ParsedText (text + Spans)
@@ -19,11 +18,11 @@
 //!
 //! # What this replaces, and why
 //!
-//! The vendored `src/xtext.c` lays out on a uniform grid: every row is
+//! HexChat's xtext widget lays out on a uniform grid: every row is
 //! `fontsize × subline_count`, the scroll adjustment's unit is fractional
 //! *text lines*, and hit-testing is `y / fontsize`. That assumption is
-//! wired through the whole widget, and every feature added since Phase 9
-//! has had to work around it — inline media reserves
+//! wired through the whole widget, and every feature added to it late
+//! had to work around it — inline media reserves
 //! `ceil(image_height / fontsize)` blank text rows and paints a texture
 //! across them, which is why selection drags through empty space and the
 //! marker line draws above an image rather than across it.
@@ -55,11 +54,11 @@
 //!
 //! # Input vocabularies
 //!
-//! [`markdown`] is the one going forward (scoping §3.9): an inline
-//! subset, rendered on display, transmitted literally, no capability
-//! negotiation needed. The legacy in-band `\003NN` escape vocabulary is
-//! gone (C6): style arrives as runs from the C side, so nothing decodes
-//! escapes and nothing can inject them.
+//! Style arrives as runs from the application, already resolved, so the
+//! engine decodes no in-band escapes and nothing a remote user sends can
+//! restyle a row. [`markdown`] is the one vocabulary it parses itself: an
+//! inline subset, rendered on display and transmitted literally.
+//! [`linkify`] finds URLs, against a scheme list the application owns.
 
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
@@ -67,6 +66,7 @@
 pub mod anchor;
 pub mod buffer;
 pub mod index;
+pub mod linkify;
 pub mod markdown;
 pub mod measure;
 pub mod message;
@@ -81,10 +81,11 @@ mod tests;
 pub use anchor::{Gravity, ScrollAnchor};
 pub use buffer::{ChatBuffer, MIN_INDENT};
 pub use index::HeightIndex;
+pub use linkify::{Linkifier, DEFAULT_SCHEMES};
 pub use markdown::{scan_delims, SourceSpan};
 pub use measure::{FixedMeasure, FontMetrics, TextMeasure};
 pub use message::{
-    Block, GroupKey, IconRef, ImageSize, LoadMoreDirection, Message, MessageFlags, MessageId,
+    Block, Blocks, GroupKey, ImageSize, LoadMoreDirection, Message, MessageFlags, MessageId,
     MessageKind, Speaker,
 };
 pub use search::{find_all, Match, SearchState};
