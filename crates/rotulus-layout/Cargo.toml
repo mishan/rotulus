@@ -22,7 +22,7 @@ bench = false
 # measurement, the one thing that genuinely needs a font stack, is
 # abstracted behind the `TextMeasure` trait (measure.rs); the widget
 # supplies a Pango-backed implementation and the tests here supply a
-# deterministic fixed-width one. See docs/chat-view.md.
+# deterministic fixed-width one. See docs/design.md.
 [dependencies]
 
 # Benchmarks only. The "no dependencies" rule above is about what the

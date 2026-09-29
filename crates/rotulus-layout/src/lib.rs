@@ -3,7 +3,7 @@
 //! Everything between "a message arrives" and "the view knows what
 //! pixels to put where", with no GTK, no GLib and no Pango, so all of it
 //! runs under `cargo test` on display-less CI. The widget that consumes
-//! it is `rotulus`; see docs/chat-view.md.
+//! it is `rotulus`; see docs/design.md.
 //!
 //! ```text
 //!   Message  ──parse──▶  ParsedText (text + Spans)

@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    # Fedora's GTK is recent, and it is what the golden images are checked
+    # against. The render tests compare at a tolerance, but a much older
+    # GTK can still lay a glyph out a pixel differently.
+    container: fedora:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor from rust-toolchain.toml, and current stable, so a
+        # new lint shows up here before it reaches a pull request.
+        toolchain: [floor, stable]
+    env:
+      CARGO_TERM_COLOR: always
+      # The container has no Wayland socket; don't let GDK look for one.
+      GDK_BACKEND: x11
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            gcc gtk4-devel xorg-x11-server-Xvfb xvfb-run dbus-daemon \
+            mesa-dri-drivers git
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Select toolchain
+        run: |
+          if [ "${{ matrix.toolchain }}" = stable ]; then
+            rustup toolchain install stable --profile minimal -c clippy,rustfmt
+            echo RUSTUP_TOOLCHAIN=stable >> "$GITHUB_ENV"
+          else
+            # With no argument, installs what rust-toolchain.toml names.
+            rustup toolchain install
+          fi
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.toolchain }}
+
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      - name: clippy
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy --workspace --all-targets --features rotulus/v4_14 -- -D warnings
+          cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+
+      # The widget's tests need a display. Each run gets its own X server
+      # and session bus, so the accessibility bus has somewhere to live.
+      - name: test
+        run: |
+          for features in "" "--features rotulus/v4_14" "--no-default-features"; do
+            dbus-run-session -- xvfb-run -a cargo test --workspace $features
+          done
+
+      - name: Keep the pictures a failing render test drew
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: render-failures-${{ matrix.toolchain }}
+          path: target/tmp/
+          if-no-files-found: ignore

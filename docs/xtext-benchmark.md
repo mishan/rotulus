@@ -1,13 +1,22 @@
 # Chat view: xtext vs hxchat, measured
 
+> **A historical record.** This is the A/B that decided Rotulus would
+> replace [GtkHx](https://github.com/mishan/gtkhx)'s vendored copy of
+> HexChat's xtext widget. It was run inside GtkHx, and every number here
+> was measured there, through GtkHx's own window and append path.
+> **hxchat** is the working name Rotulus had at the time. File paths
+> starting with `src/` or `tools/` are GtkHx's, and most of them no longer
+> exist. How Rotulus works today is in [design.md](design.md).
+
 **Date:** 2026-07-27. **Verdict:** hxchat replaces xtext.
 
-This is the record behind the C5 decision to delete `src/xtext.c` — 6,721
-lines that had worked since 2000 and survived the GTK 2 → 3 → 4 climb.
-Deleting code of that vintage on the strength of an impression would have
-been a bad trade, so the two backends were measured against each other
-while both were still in the tree. They cannot be measured against each
-other again after C5; this file is the only place that comparison exists.
+This is the record behind the decision to delete GtkHx's `src/xtext.c` —
+several thousand lines that had worked since 2000 and survived the
+GTK 2 → 3 → 4 climb. Deleting code of that vintage on the strength of an
+impression would have been a bad trade, so the two backends were measured
+against each other while both were still in the tree. They cannot be
+measured against each other again now that xtext is gone; this file is the
+only place that comparison exists.
 
 It also records two measurement failures, at length. Both produced
 complete, plausible, entirely wrong result sets, and one of them was
@@ -21,8 +30,8 @@ the numbers.
 
 | | |
 |---|---|
-| **xtext** | `src/xtext.c`, HexChat's text widget, vendored during the GTK 2 port, plus ~1,550 lines of GtkHx grafts. Line-uniform vertical layout: every coordinate derives from `fontsize × subline_count`. Wraps at append time. |
-| **hxchat** | `rust/crates/rotulus-layout` (engine) + `rotulus` (GTK4 widget). Pixel-based variable-height layout, retained per-row layout cache, chunked prefix-sum height index. Wraps lazily, per visible row. |
+| **xtext** | `src/xtext.c`, HexChat's text widget, vendored during the GTK 2 port, plus a substantial layer of GtkHx grafts. Line-uniform vertical layout: every coordinate derives from `fontsize × subline_count`. Wraps at append time. |
+| **hxchat** | `crates/rotulus-layout` (engine) + `crates/rotulus` (GTK4 widget). Pixel-based variable-height layout, retained per-row layout cache, chunked prefix-sum height index. Wraps lazily, per visible row. |
 
 Both were driven through the same `rotulus.h` seam, from the same
 binary, in the same window, by the same append path. `GTKHX_CHATVIEW`
@@ -30,11 +39,13 @@ selected the backend and was the only difference between runs.
 
 Harness: `src/chat_bench.c`, armed by `GTKHX_CHATVIEW_BENCH=<n>`, driven
 by `tools/chatbench.sh`. Both have since been replaced: the same phases now
-run as the `chat` scenario of the in-app benchmark harness
-(`rust/crates/gtkhx-ui/src/bench/`), driven by `tools/uibench.sh`. See
-[performance.md](performance.md). First paint is now timed to the end of
-the paint rather than the next frame tick, so the first-paint figures below
-read up to one refresh interval higher than the new harness reports.
+run as the `chat` scenario of GtkHx's in-app benchmark harness
+(`rust/crates/gtkhx-ui/src/bench/` in GtkHx), driven by
+`tools/uibench.sh`. See GtkHx's
+[performance.md](https://github.com/mishan/gtkhx/blob/main/docs/performance.md).
+First paint is now timed to the end of the paint rather than the next
+frame tick, so the first-paint figures below read up to one refresh
+interval higher than the new harness reports.
 
 ## 2. Environment
 
@@ -114,7 +125,7 @@ to. That is the design working, not a measurement gap.
 ### Relayout — worst frame 105.6 ms → 16.9 ms
 
 The load-bearing result, and the direct test of the retained-layout claim
-(see [chat-view.md](chat-view.md), "Layout, the height index, and scroll
+(see [design.md](design.md), "Layout, the height index, and scroll
 anchoring") that reflow should cost O(visible) rather than O(scrollback).
 
 A font change invalidates every cached width and every wrap point in all
@@ -189,7 +200,7 @@ remembering.
 `want_hxchat()` in `chat_view.c` accepted only `"new"` and `"hxchat"`.
 (Both are gone now: with one backend there is nothing to select, so the
 `GTKHX_CHATVIEW` switch, the `want_hxchat` predicate and the whole
-`src/chat_view.c` dispatcher went with xtext. `rust/crates/rotulus/include/rotulus.h` is a
+`src/chat_view.c` dispatcher went with xtext. `crates/rotulus/include/rotulus.h` is a
 declaration header today.)
 The harness passed `GTKHX_CHATVIEW=0` and `=1` — the obvious spelling for
 a boolean, and what the harness docs, the `chat_bench.c` header and the
@@ -265,12 +276,12 @@ behaviour at scrollback sizes far above 20k, or any cross-machine
 comparison. The 105 ms xtext relayout spike is established as real but
 not characterised — it appeared in two runs of three.
 
-**Cannot be repeated.** After C5 there is one backend. The reflow harness
+**Cannot be repeated.** With xtext deleted there is one backend. The reflow harness
 survives as a single-backend regression baseline, which is a different
 and lesser thing: it can tell you that hxchat got slower, not that it was
 ever better than what it replaced. That is why this file exists.
 
 ---
 
-*Harness: `src/chat_bench.c`, `tools/chatbench.sh`. The subsystem itself
-is documented in [chat-view.md](chat-view.md).*
+*Harness: GtkHx's `src/chat_bench.c` and `tools/chatbench.sh`, both since
+replaced. The widget itself is documented in [design.md](design.md).*

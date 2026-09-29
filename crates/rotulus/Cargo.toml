@@ -8,10 +8,11 @@ description = "A GTK4 scrollback view for text-stream chat"
 publish = false
 
 [lib]
-# rlib only. gtkhx-ffi is the workspace's single staticlib and bundles the
-# whole rlib graph into libgtkhx_ffi.a; a second staticlib here would
-# double-define this crate's #[no_mangle] symbols at the final link. See
-# crates/gtkhx-ffi/src/lib.rs for the full rationale.
+# rlib only. An application that links its Rust statically bundles this
+# into its own staticlib, as GtkHx does, and a second staticlib here would
+# define the #[no_mangle] C exports twice at that application's final link.
+# A shared library for C belongs in a crate of its own, so that dependents
+# don't build it too.
 crate-type = ["rlib"]
 
 [features]
@@ -34,3 +35,8 @@ gtk4 = { workspace = true, features = ["v4_10"] }
 # layouts the snapshot pass hands to GSK.
 pango = "0.22"
 pangocairo = "0.22"
+
+[[test]]
+name = "render"
+# The single-column scene builds its lines through the mIRC parser.
+required-features = ["mirc"]

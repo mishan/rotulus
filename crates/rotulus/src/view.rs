@@ -181,18 +181,14 @@ impl Mark {
     }
 }
 
-/// Search highlight colours.
-///
-/// These are the *same* colours the news panel's find bar already uses
-/// (`news.rs`, tags `search-match` / `search-current`): Adwaita yellow-4
-/// `#f6d32d` on black for every hit, orange `#ff7800` on white for the
-/// active one. Two find bars in one app that highlight differently is a
-/// papercut, and this way there is one place to change it.
+/// Search highlight colors: Adwaita yellow-4 `#f6d32d` on black for every
+/// hit, orange `#ff7800` on white for the active one. An application can
+/// use the same pair in its other find bars, so that two in one app don't
+/// highlight differently.
 ///
 /// Fixed rather than themed, deliberately: the palette is a contract
-/// with `rotulus.h` (38 slots, mirrored in the theme file format), so
-/// widening it for this would mean a schema change every theme has to
-/// answer.
+/// with `rotulus.h`, so widening it for this would mean a change every
+/// application that sets a palette has to answer.
 const SEARCH_MATCH_BG: gtk4::gdk::RGBA = gtk4::gdk::RGBA::new(0.9647, 0.8275, 0.1765, 1.0);
 const SEARCH_MATCH_FG: gtk4::gdk::RGBA = gtk4::gdk::RGBA::new(0.0, 0.0, 0.0, 1.0);
 const SEARCH_CURRENT_BG: gtk4::gdk::RGBA = gtk4::gdk::RGBA::new(1.0, 0.4706, 0.0, 1.0);
@@ -958,7 +954,7 @@ impl RotulusView {
         self.queue_draw();
     }
 
-    /// Zoom, per-mille. See docs/chat-view.md "Zoom".
+    /// Zoom, per-mille. See docs/design.md "Zoom".
     fn apply_zoom_permille(&self, zoom: u32) {
         let imp = self.imp_();
         let was = imp.measure.borrow().zoom_permille();

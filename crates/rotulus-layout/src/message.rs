@@ -6,7 +6,7 @@
 //! smuggled in as a magic word (`hxmedia:N`) or a magic
 //! non-breaking-space sentinel. Here a message is a value with fields.
 //!
-//! See docs/chat-view.md "The message model".
+//! See docs/design.md "The message model".
 
 use crate::span::ParsedText;
 
@@ -286,7 +286,7 @@ impl MessageFlags {
     /// Direction, not sender identity — "is the sender me" cannot tell
     /// the echo of a message you just sent from the server's copy of it
     /// when you message yourself, and grouping needs to. See
-    /// `rotulus.h`'s `RotulusSpeaker.outgoing`.
+    /// `rotulus.h`'s `ROTULUS_ROW_OUTGOING`.
     pub const OUTGOING: MessageFlags = MessageFlags(1 << 3);
     /// Server tombstone for a deleted message.
     pub const DELETED: MessageFlags = MessageFlags(1 << 4);

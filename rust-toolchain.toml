@@ -1,0 +1,5 @@
+# The workspace's rustc floor (rust-version in Cargo.toml), so a local
+# build and CI's MSRV job use the same compiler.
+[toolchain]
+channel = "1.92"
+components = ["clippy", "rustfmt"]

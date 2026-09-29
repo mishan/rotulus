@@ -1,11 +1,10 @@
-//! Layout-engine microbenchmarks: the CPU half of what the in-app chat
-//! benchmark (`gtkhx-ui`'s `bench` module) measures through the real frame
-//! clock.
+//! Layout-engine microbenchmarks: the CPU half of what an application's
+//! own frame-clock benchmark measures through the real widget.
 //!
 //! These run headless against [`FixedMeasure`], so they time the engine —
 //! wrapping, the height index, anchoring, search — and not Pango's text
 //! shaping. A regression here is a regression in our code; a regression
-//! that only shows in `tools/uibench.sh` is somewhere else.
+//! that only shows through the widget is somewhere else.
 //!
 //! The scrollback sizes are the instrument check. The engine's central
 //! claim is that a frame costs O(visible), not O(scrollback), so

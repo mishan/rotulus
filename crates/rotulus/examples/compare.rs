@@ -25,7 +25,7 @@
 //!
 //! ```sh
 //! for w in rotulus textview listview; do
-//!     tools/isolated-run.sh cargo run --release -p rotulus --example compare -- $w 20000
+//!     xvfb-run -a cargo run --release -p rotulus --example compare -- $w 20000
 //! done
 //! ```
 //!
@@ -245,7 +245,7 @@ fn main() {
     let kind = args.get(1).map(String::as_str).unwrap_or("rotulus");
     let n: u32 = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(20_000);
 
-    gtk::init().expect("GTK needs a display: run under tools/isolated-run.sh");
+    gtk::init().expect("GTK needs a display: run under xvfb-run -a");
     let (subject, widget) = Subject::new(kind);
     let scroller = gtk::ScrolledWindow::new();
     scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Always);

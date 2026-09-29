@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = ["crates/rotulus", "crates/rotulus-layout", "crates/rotulus-mirc"]
+
+[workspace.package]
+# The gtk-rs line's MSRV; the floor moves when gtk-rs does. Declaring it
+# here turns on the MSRV-aware resolver, which keeps transitive
+# dependencies from jumping to versions that need a newer rustc.
+rust-version = "1.92"
+
+[workspace.dependencies]
+glib = "0.22"
+gtk4 = "0.11"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"

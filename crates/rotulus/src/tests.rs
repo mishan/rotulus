@@ -334,9 +334,9 @@ fn font_change_invalidates_the_cache() {
 // was ready.) Keeping all GTK work in a single test function means only
 // one thread ever touches it, whatever the harness does.
 //
-// On display-less CI it no-ops. On a developer machine it exercises the
-// exact call sequence an application's setup performs, which is what all three
-// crashes died in.
+// It needs a display, and fails without one. It exercises the exact call
+// sequence an application's setup performs, which is what all three crashes
+// died in.
 
 use gtk4::glib::prelude::*;
 use gtk4::glib::translate::IntoGlib;
@@ -353,7 +353,7 @@ fn gtk_class_and_construction_smoke() {
     // looks like a pass is worse than no test at all; the repo has a rule
     // about this and it applies to Rust tests as much as to the C ones.
     //
-    // CI now supplies a display (`xvfb-run`, see .github/workflows/tests.yml),
+    // CI now supplies a display (`xvfb-run`, see .github/workflows/ci.yml),
     // so failing here means the harness is misconfigured, which is exactly
     // what we want to hear about.
     assert!(

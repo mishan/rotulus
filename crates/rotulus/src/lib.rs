@@ -4,7 +4,7 @@
 //! that crate and is tested headless; this one owns the widget, the
 //! Pango font backend, and the C ABI declared in `include/rotulus.h`.
 //!
-//! What it promises, and what it doesn't, is in docs/chat-view.md.
+//! What it promises, and what it doesn't, is in docs/design.md.
 //!
 //! # Translations
 //!

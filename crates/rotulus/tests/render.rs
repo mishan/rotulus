@@ -12,7 +12,7 @@
 //! To accept a deliberate change, re-render the goldens:
 //!
 //! ```sh
-//! ROTULUS_UPDATE_GOLDEN=1 tools/isolated-run.sh cargo test -p rotulus --test render
+//! ROTULUS_UPDATE_GOLDEN=1 xvfb-run -a cargo test -p rotulus --test render
 //! ```
 //!
 //! A failing scene leaves the picture it drew, and a map of where it
@@ -406,7 +406,7 @@ fn scenes_match_their_goldens() {
     pin_environment();
     assert!(
         gtk::init().is_ok(),
-        "GTK could not be initialized — run under tools/isolated-run.sh, as CI does"
+        "GTK could not be initialized — run under a display, e.g. xvfb-run -a, as CI does"
     );
     if let Some(s) = gtk::Settings::default() {
         s.set_gtk_xft_dpi(96 * 1024);

@@ -1,6 +1,6 @@
 //! The markdown inline scanner.
 //!
-//! Implements the restricted subset in docs/chat-view.md "Markdown" —
+//! Implements the restricted subset in docs/design.md "Markdown" —
 //! `**bold**`, `*italic*` / `_italic_`, `` `code` ``, `~~strike~~`,
 //! `[label](url)`, and backslash escapes. Block constructs (fenced code,
 //! `>` quotes) are recognised by [`split_blocks`] before this scanner
