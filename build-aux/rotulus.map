@@ -1,0 +1,6 @@
+{
+  global:
+    rotulus_*;
+  local:
+    *;
+};

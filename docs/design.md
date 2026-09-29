@@ -42,6 +42,42 @@ crates/rotulus-mirc    IRC formatting codes to styled runs, for an
 The header lives in the crate, beside the code that implements it, so the
 widget carries its own interface.
 
+### One shared library, three ways in
+
+A C program links `librotulus-1.so` through pkg-config (`rotulus-1`).
+Python, GJS and Vala reach the same functions through the introspection
+data (`Rotulus-1.typelib`, `Rotulus-1.gir`, `rotulus-1.vapi`). A Rust
+program depends on the crates.
+
+Meson builds the shared library. It has cargo build the `rotulus` crate
+as a static archive (`cargo rustc --crate-type staticlib`, so the crate
+itself stays an rlib), links the whole archive into a versioned shared
+library, and exports only `rotulus_*` through a version script. The
+archive carries the Rust standard library and every dependency, and none
+of their symbols belong in an application's namespace; the export test
+holds the library to that. The same scheme is librsvg's.
+
+An application that already bundles its Rust into a static library of its
+own, as GtkHx does, links the `rotulus` rlib into that instead, and never
+sees the shared library.
+
+Three things about the C ABI exist for the bindings:
+
+- **The methods take a `RotulusView *`,** declared with
+  `G_DECLARE_FINAL_TYPE`, so introspection sees them as methods of the
+  class. `rotulus_view_new` returns a `GtkWidget *`, as GTK constructors
+  do; `ROTULUS_VIEW()` casts it.
+- **`RotulusMark` is a boxed type** whose copy returns the same mark and
+  whose free does nothing. A mark is an id, not a pointer to anything, so
+  there is nothing to copy; but GJS refuses to hold a pointer whose type
+  it can't copy.
+- **The `capi` cargo feature** switches off gtk4-rs's check that Rust
+  initialized GTK. A C program initializes GTK itself, so the check is
+  redundant there, and the introspection scanner fails it outright: it
+  builds the widget's class to read its properties and signals without
+  ever initializing GTK. Only the shared library turns the feature on; a
+  Rust program keeps the check.
+
 Two properties of that interface are worth not giving back. **No
 struct-field access:** xtext's callers wrote `GTK_XTEXT(w)->wordwrap`,
 `->max_lines`, `->urlcheck_function` and read `->buffer` and `->adj`;
@@ -119,6 +155,16 @@ the body — borrowed for the duration of the call and built on the stack.
 explicit. Under xtext it had to be inferred: a row whose every run was in
 the muted history color was history, and the load-older row was
 recognized by its text.
+
+A language binding can't build run arrays on the stack, and GObject
+introspection can't describe a struct holding pointers to them. So the
+same row can be built call by call as a `RotulusMessage`, a boxed type
+that owns its text: `rotulus_message_new`, `_set_speaker`, `_add_nick`,
+`_add_text`, `_add_mirc`, then `rotulus_view_append_message`,
+`_insert_message_before` or `_replace_message`. It becomes a
+`RotulusRow` pointing into itself at the moment it is appended, so the
+two paths share every rule below. The `RotulusRow` functions are
+skipped in the introspection data.
 
 A run is `(text, palette index, attrs)`, written with `ROTULUS_RUN`,
 plus optional fields that take effect only under their attribute bits: a
@@ -208,8 +254,8 @@ does not shift the column.
 Avatars resolve through the application's avatar function
 (`rotulus_view_set_avatar_func`). It should share the user list's rule for
 which image a user has — in GtkHx, a GIF avatar wins over the classic
-Hotline icon — or chat and the user list will disagree. The paintable is
-borrowed only until the draw finishes, and the function is asked on
+Hotline icon — or chat and the user list will disagree. The function returns a
+new reference, which the view drops after the draw, and it is asked on
 every draw: animated avatars advance on the application's own frame
 timer, so the view asks per draw rather than caching a frame that would
 freeze. Rows whose speaker is unknown get no slot at all; there would be
@@ -730,7 +776,10 @@ disagree about what a link is.
 
 `rotulus_view_set_avatar_func` installs a function from a speaker's key to
 a `GdkPaintable`, asked on every draw so an animated avatar animates;
-anything expensive belongs in the application's cache. The function must
+anything expensive belongs in the application's cache. It returns a full
+reference: a binding's wrapper for a paintable it just made may be gone
+by the time the call returns, so a borrowed one would be freed under the
+view. The function must
 not change the view. `avatar-size` sets the edge in pixels, and 0 hides
 avatars.
 
@@ -949,8 +998,8 @@ not call `gtk_accessible_announce` for it. Whether a screen reader should
 speak every new message, and how politely, is worth deciding with someone
 who uses one.
 
-### An introspectable row API
+### Animated media from a binding
 
-`RotulusRow` holds pointers to run arrays, which GObject introspection
-cannot describe. Python, JavaScript and Vala will want a boxed message
-type built call by call; that belongs with packaging the widget.
+`rotulus_view_media_set_frames` takes an array of `RotulusFrame`
+structs, which the introspection data skips. A binding can set a still
+image with `rotulus_view_media_set_texture`, but not an animation.

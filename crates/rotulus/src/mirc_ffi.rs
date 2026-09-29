@@ -95,3 +95,28 @@ pub unsafe extern "C" fn rotulus_mirc_parse(
     }
     out
 }
+
+/// # Safety
+/// `m` is NULL or a valid `RotulusMessage *`; `text` is NULL or
+/// NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_message_add_mirc(
+    m: *mut crate::message_ffi::RotulusMessage,
+    text: *const c_char,
+) {
+    let (Some(m), false) = (m.as_mut(), text.is_null()) else {
+        return;
+    };
+    let text = std::ffi::CStr::from_ptr(text).to_string_lossy();
+    for seg in rotulus_mirc::segments(&text) {
+        let run = run_of(text.as_ptr() as *const c_char, &seg);
+        m.push_body(crate::message_ffi::OwnedRun {
+            text: text[seg.range.clone()].to_owned(),
+            color: run.color,
+            attrs: run.attrs,
+            background: run.background,
+            rgb: run.rgb,
+            background_rgb: run.background_rgb,
+        });
+    }
+}
