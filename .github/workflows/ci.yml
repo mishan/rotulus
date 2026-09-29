@@ -57,6 +57,7 @@ jobs:
           cargo clippy --workspace --all-targets -- -D warnings
           cargo clippy --workspace --all-targets --features rotulus/v4_14 -- -D warnings
           cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+          cargo clippy --workspace --all-targets --features rotulus/capi -- -D warnings
 
       # The widget's tests need a display. Each run gets its own X server
       # and session bus, so the accessibility bus has somewhere to live.
@@ -73,3 +74,42 @@ jobs:
           name: render-failures-${{ matrix.toolchain }}
           path: target/tmp/
           if-no-files-found: ignore
+
+  library:
+    name: shared library and introspection
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    env:
+      CARGO_TERM_COLOR: always
+      GDK_BACKEND: x11
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            gcc gtk4-devel gobject-introspection-devel meson ninja-build \
+            cargo rust vala python3-gobject gjs gettext binutils \
+            xorg-x11-server-Xvfb xvfb-run dbus-daemon mesa-dri-drivers git
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: library
+          workspaces: ". -> _build/cargo-target"
+
+      # werror makes the introspection scanner's warnings fatal too.
+      - name: Build
+        run: |
+          meson setup _build -Dwerror=true -Dprefix=/usr
+          meson compile -C _build
+
+      - name: Test
+        run: dbus-run-session -- xvfb-run -a meson test -C _build --print-errorlogs
+
+      # Build the C smoke test against the installed library, through
+      # pkg-config, the way an application would.
+      - name: Install, and build against the installed library
+        run: |
+          meson install -C _build
+          cc -o smoke-installed tests/smoke.c $(pkg-config --cflags --libs rotulus-1)
+          dbus-run-session -- xvfb-run -a ./smoke-installed

@@ -8,7 +8,7 @@
 //! Nothing dereferences it, which is why a stale mark is inert rather
 //! than dangling.
 //!
-//! **Widgets.** Every entry point takes a `GtkWidget *` the caller owns
+//! **Widgets.** Every entry point takes a `RotulusView *` the caller owns
 //! and wraps it with a plain reference ([`view_of`]); none of them may
 //! sink a floating reference, which is the easiest way to destroy a
 //! widget the caller still thinks it has.
@@ -22,7 +22,7 @@ use rotulus_layout::{
 };
 use std::ffi::{c_char, c_int, c_uint, c_void, CStr};
 
-type CGtkWidget = *mut gtk4::ffi::GtkWidget;
+pub(crate) type CGtkWidget = *mut gtk4::ffi::GtkWidget;
 
 /// # Safety
 /// `p` is NULL or a valid NUL-terminated C string.
@@ -61,11 +61,11 @@ fn stamp_or_now(stamp: i64) -> i64 {
         .unwrap_or(0)
 }
 
-fn mark_to_ptr(id: MessageId) -> *mut c_void {
+pub(crate) fn mark_to_ptr(id: MessageId) -> *mut c_void {
     id.0 as usize as *mut c_void
 }
 
-fn ptr_to_mark(p: *mut c_void) -> Option<MessageId> {
+pub(crate) fn ptr_to_mark(p: *mut c_void) -> Option<MessageId> {
     match p as usize as u64 {
         0 => None,
         v => Some(MessageId(v)),
@@ -86,7 +86,7 @@ fn ptr_to_mark(p: *mut c_void) -> Option<MessageId> {
 ///
 /// # Safety
 /// `w` is NULL or a valid `GtkWidget *` owned by the caller.
-unsafe fn view_of(w: CGtkWidget) -> Option<RotulusView> {
+pub(crate) unsafe fn view_of(w: CGtkWidget) -> Option<RotulusView> {
     if w.is_null() {
         return None;
     }
@@ -643,8 +643,10 @@ pub unsafe extern "C" fn rotulus_view_set_avatar_func(
         if p.is_null() {
             None
         } else {
-            // Borrowed, per the contract: take our own reference.
-            Some(gtk4::glib::translate::from_glib_none(p))
+            // A full reference, per the contract, which a language binding
+            // needs: its wrapper for a freshly made paintable may be gone by
+            // the time the call returns.
+            Some(gtk4::glib::translate::from_glib_full(p))
         }
     })));
 }
@@ -929,4 +931,29 @@ pub unsafe extern "C" fn rotulus_view_search_step(
 #[no_mangle]
 pub unsafe extern "C" fn rotulus_view_search_clear(w: CGtkWidget) {
     with_view!(w, v, v.search_clear())
+}
+
+// ---- the mark type --------------------------------------------------
+
+unsafe extern "C" fn mark_copy(p: *mut c_void) -> *mut c_void {
+    p
+}
+
+unsafe extern "C" fn mark_free(_: *mut c_void) {}
+
+/// `RotulusMark` as a boxed type, so that language bindings can hold one.
+///
+/// A mark is a row id, not a pointer to anything, so copying it is the
+/// identity and freeing it does nothing; a binding that copies and frees
+/// it as it would any boxed value handles the same id throughout.
+#[no_mangle]
+pub extern "C" fn rotulus_mark_get_type() -> gtk4::glib::ffi::GType {
+    static TYPE: std::sync::OnceLock<gtk4::glib::ffi::GType> = std::sync::OnceLock::new();
+    *TYPE.get_or_init(|| unsafe {
+        gtk4::glib::gobject_ffi::g_boxed_type_register_static(
+            c"RotulusMark".as_ptr(),
+            Some(mark_copy),
+            Some(mark_free),
+        )
+    })
 }

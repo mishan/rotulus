@@ -72,25 +72,21 @@ The full tables, including 200,000 messages, are in
 | Crate | What it is |
 |---|---|
 | [`rotulus-layout`](crates/rotulus-layout) | The layout engine: the message model, wrapping, the height index, scroll anchoring, selection and search. It has no dependencies. |
-| [`rotulus`](crates/rotulus) | The GTK4 widget over the engine, and the C ABI in [`include/rotulus.h`](crates/rotulus/include/rotulus.h). |
+| [`rotulus`](crates/rotulus) | The GTK4 widget over the engine, and the C ABI in [`include/rotulus.h`](crates/rotulus/include/rotulus.h). Meson builds it into `librotulus-1`. |
 | [`rotulus-mirc`](crates/rotulus-mirc) | Converts IRC (mIRC) formatting codes into styled runs. The `rotulus` crate's default `mirc` feature exposes it to C as `rotulus_mirc_parse`. |
 
 ## Using it
 
-**From Rust:**
+**From C**, link `librotulus-1` through pkg-config:
 
-```rust
-use rotulus::RotulusView;
-use rotulus_layout::{Message, ParsedText, Speaker};
-
-let view = RotulusView::new();
-view.append(Message::live(Speaker::new(42, "alice"), ParsedText::plain("hello")));
+```sh
+cc app.c $(pkg-config --cflags --libs rotulus-1)
 ```
 
-**From C**, through `rotulus.h`:
-
 ```c
-GtkWidget *view = rotulus_view_new ();
+#include <rotulus.h>
+
+RotulusView *view = ROTULUS_VIEW (rotulus_view_new ());
 
 RotulusRun nick = ROTULUS_RUN_PLAIN ("alice", -1);
 RotulusRun body = ROTULUS_RUN ("hello", -1, ROTULUS_COLOR_DEFAULT,
@@ -102,6 +98,30 @@ RotulusRow row = {
     .body = &body, .n_body = 1,
 };
 rotulus_view_append (view, &row);
+```
+
+**From Python, JavaScript or Vala**, through GObject introspection:
+
+```python
+import gi
+gi.require_version("Rotulus", "1")
+from gi.repository import Rotulus
+
+view = Rotulus.View()
+msg = Rotulus.Message.new(Rotulus.RowKind.MESSAGE)
+msg.set_speaker(42, "alice")
+msg.add_text("hello", Rotulus.COLOR_DEFAULT, Rotulus.ATTR_BOLD)
+view.append_message(msg)
+```
+
+**From Rust:**
+
+```rust
+use rotulus::RotulusView;
+use rotulus_layout::{Message, ParsedText, Speaker};
+
+let view = RotulusView::new();
+view.append(Message::live(Speaker::new(42, "alice"), ParsedText::plain("hello")));
 ```
 
 The view is a GtkScrollable, so put it in a GtkScrolledWindow. The
@@ -118,15 +138,34 @@ Its behavior is set through GObject properties such as `markdown`,
 [docs/design.md](docs/design.md) covers what an application hooks, and
 why the widget is shaped the way it is.
 
-Today a C application links Rotulus statically: it bundles the `rotulus`
-rlib into a Rust staticlib of its own, as GtkHx does. A versioned shared
-library with pkg-config and GObject introspection files is planned before
-1.0.
-
-## Building and testing
+## Building
 
 You need GTK 4.10 or newer and Rust 1.92 or newer (see
 `rust-toolchain.toml`).
+
+The shared library, its header, the pkg-config file, the introspection
+data, the Vala bindings and the translations are built with Meson, which
+drives cargo:
+
+```sh
+meson setup _build
+meson compile -C _build
+xvfb-run -a meson test -C _build     # the smoke tests need a display
+meson install -C _build
+```
+
+Meson options:
+
+- **`introspection`** (`auto`): the GIR and typelib. Needs
+  gobject-introspection.
+- **`vapi`** (`auto`): the Vala bindings. Needs vapigen.
+- **`tests`** (`true`): the smoke tests. They drive the library from C,
+  Python and GJS, and check that it exports nothing but its C API.
+
+It builds against GTK 4.14's accessibility interface when it finds GTK
+4.14 or newer.
+
+The Rust crates build and test with cargo alone:
 
 ```sh
 cargo build
@@ -136,10 +175,12 @@ xvfb-run -a cargo test --workspace            # the widget's tests need a displa
 
 Cargo features on `rotulus`:
 
-- **`mirc`** (default): the C entry point to `rotulus-mirc`.
+- **`mirc`** (default): the C entry points to `rotulus-mirc`.
 - **`v4_14`**: implements GtkAccessibleText, so a screen reader can read
   the transcript. Needs GTK 4.14. Without it, the view builds against
   GTK 4.10 and exposes only its accessible role.
+- **`capi`**: for the shared library alone. It switches off gtk4-rs's
+  check that Rust initialized GTK, which a C caller never does.
 
 The golden render tests draw with the bundled DejaVu Sans Mono and compare
 the result at a tolerance. To accept a deliberate change to the rendering:
@@ -158,10 +199,10 @@ Benchmarks:
 ## Translations
 
 The widget's own strings, in its context menus, are in the `rotulus`
-gettext domain. The catalogs are in `crates/rotulus/po`, with a Meson
-fragment that compiles them. An application that installs the compiled
-catalog calls `bindtextdomain ("rotulus", localedir)`. One that doesn't
-gets English.
+gettext domain. The catalogs are in `crates/rotulus/po`, and `meson install` installs
+them. An application whose catalogs are elsewhere calls
+`bindtextdomain ("rotulus", localedir)`. Without a catalog, the menus are
+in English.
 
 ## License
 

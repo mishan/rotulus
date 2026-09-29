@@ -17,6 +17,7 @@ mod a11y;
 pub mod ffi;
 pub mod links;
 pub mod measure;
+pub mod message_ffi;
 #[cfg(feature = "mirc")]
 pub mod mirc_ffi;
 pub mod view;
@@ -43,14 +44,23 @@ pub(crate) fn tr(s: &str) -> String {
     }
 }
 
-/// Tell gtk4-rs that GTK is already initialized.
+/// Tell gtk4-rs that GTK is already initialized, when it is.
 ///
 /// An application written in C calls `gtk_init` itself, so gtk4-rs's own
 /// init flag is never set — and its widget constructors assert on that
 /// flag, aborting across the FFI even though GTK is running. Every C-ABI
 /// entry point that constructs a widget calls this first.
+///
+/// Registering the type doesn't need GTK, and the introspection scanner
+/// asks for it without ever initializing GTK; gtk4-rs asserts that GTK
+/// really is up, so only say so when it is.
 pub(crate) fn ensure_gtk_init() {
-    unsafe { gtk4::set_initialized() };
+    if gtk4::is_initialized() {
+        return;
+    }
+    if unsafe { gtk4::ffi::gtk_is_initialized() } != 0 {
+        unsafe { gtk4::set_initialized() };
+    }
 }
 
 #[cfg(test)]

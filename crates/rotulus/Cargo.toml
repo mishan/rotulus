@@ -11,8 +11,8 @@ publish = false
 # rlib only. An application that links its Rust statically bundles this
 # into its own staticlib, as GtkHx does, and a second staticlib here would
 # define the #[no_mangle] C exports twice at that application's final link.
-# A shared library for C belongs in a crate of its own, so that dependents
-# don't build it too.
+# The C shared library is Meson's to build: it asks cargo for a staticlib
+# of this crate for that build alone (see meson.build).
 crate-type = ["rlib"]
 
 [features]
@@ -23,6 +23,11 @@ mirc = ["dep:rotulus-mirc"]
 # interface arrived in GTK 4.14; without the feature the view builds
 # against 4.10 and exposes only its role.
 v4_14 = ["gtk4/v4_14"]
+# For the C shared library that Meson builds, and nothing else. Its caller
+# initializes GTK, as any C program does, so gtk4-rs's check that Rust did
+# is switched off. The introspection scanner needs that too: it builds the
+# widget's class without ever initializing GTK, and the check aborts it.
+capi = ["gtk4/unsafe-assume-initialized"]
 
 [dependencies]
 rotulus-mirc = { path = "../rotulus-mirc", optional = true }
