@@ -96,7 +96,7 @@ jobs:
         run: |
           dnf install -y --setopt=install_weak_deps=False \
             gcc gtk4-devel gobject-introspection-devel meson ninja-build \
-            cargo rust vala python3-gobject gjs gettext binutils \
+            cargo rust vala python3-gobject gjs gettext binutils gi-docgen \
             xorg-x11-server-Xvfb xvfb-run dbus-daemon mesa-dri-drivers git
 
       - uses: Swatinem/rust-cache@v2
@@ -107,7 +107,7 @@ jobs:
       # werror makes the introspection scanner's warnings fatal too.
       - name: Build
         run: |
-          meson setup _build -Dwerror=true -Dprefix=/usr
+          meson setup _build -Dwerror=true -Dprefix=/usr -Ddocumentation=true
           meson compile -C _build
 
       - name: Test
@@ -120,3 +120,25 @@ jobs:
           meson install -C _build
           cc -o smoke-installed tests/smoke.c $(pkg-config --cflags --libs rotulus-1)
           dbus-run-session -- xvfb-run -a ./smoke-installed
+
+      # The API reference, as a Pages artifact: downloadable from any run,
+      # and what the deploy job publishes from main.
+      - name: Keep the API reference
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _build/rotulus-1
+
+  api-reference:
+    name: publish the API reference
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: library
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

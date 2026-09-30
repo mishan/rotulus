@@ -2,5 +2,7 @@ option('introspection', type: 'feature', value: 'auto',
   description: 'Build the GObject introspection data')
 option('vapi', type: 'feature', value: 'auto',
   description: 'Build the Vala bindings (needs introspection)')
+option('documentation', type: 'boolean', value: false,
+  description: 'Build the API reference (needs introspection and gi-docgen)')
 option('tests', type: 'boolean', value: true,
   description: 'Build the C and introspection smoke tests')

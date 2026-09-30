@@ -137,6 +137,31 @@ if introspection.allowed()
   endif
 endif
 
+# ---- API reference ----------------------------------------------------
+
+if get_option('documentation')
+  if gir.length() == 0
+    error('the API reference is built from the introspection data; enable introspection')
+  endif
+  gidocgen = find_program('gi-docgen')
+  docs_toml = configure_file(
+    input: 'docs/rotulus.toml.in',
+    output: 'rotulus.toml',
+    configuration: {'version': meson.project_version()},
+  )
+  custom_target('api-reference',
+    input: [docs_toml, gir[0]],
+    output: lib_name,
+    command: [gidocgen, 'generate', '--quiet', '--fatal-warnings',
+      '--config=@INPUT0@', '--output-dir=@OUTPUT@', '--no-namespace-dir',
+      '--content-dir=' + meson.project_source_root() / 'docs',
+      '@INPUT1@'],
+    build_by_default: true,
+    install: true,
+    install_dir: get_option('datadir') / 'doc',
+  )
+endif
+
 # ---- translations -----------------------------------------------------
 
 subdir('crates/rotulus/po')
