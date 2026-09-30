@@ -204,6 +204,11 @@ them. An application whose catalogs are elsewhere calls
 `bindtextdomain ("rotulus", localedir)`. Without a catalog, the menus are
 in English.
 
+A change that adds or changes a string needs it translated in every
+language before it merges; `tools/check-translations.sh`, which CI runs,
+says what is missing. `meson compile -C _build rotulus-update-po` brings
+the catalogs up to date with the source.
+
 ## License
 
 LGPL-2.1-or-later. See [COPYING](COPYING). The bundled test fonts carry

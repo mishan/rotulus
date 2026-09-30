@@ -104,6 +104,9 @@ jobs:
           key: library
           workspaces: ". -> _build/cargo-target"
 
+      - name: Translations
+        run: tools/check-translations.sh
+
       # werror makes the introspection scanner's warnings fatal too.
       - name: Build
         run: |
