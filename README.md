@@ -133,6 +133,10 @@ application reacts through signals:
 - `media-activated`
 - `selection-changed`
 
+The API reference for C and the language bindings is at
+<https://mishan.github.io/rotulus/>; the Rust API is on
+[docs.rs](https://docs.rs/rotulus).
+
 Its behavior is set through GObject properties such as `markdown`,
 `link-schemes`, `activate-links`, `show-timestamps` and `max-lines`.
 [docs/design.md](docs/design.md) covers what an application hooks, and
@@ -159,6 +163,8 @@ Meson options:
 - **`introspection`** (`auto`): the GIR and typelib. Needs
   gobject-introspection.
 - **`vapi`** (`auto`): the Vala bindings. Needs vapigen.
+- **`documentation`** (`false`): the API reference, with gi-docgen, from
+  the introspection data. Installed under `share/doc/rotulus-1`.
 - **`tests`** (`true`): the smoke tests. They drive the library from C,
   Python and GJS, and check that it exports nothing but its C API.
 

@@ -43,11 +43,12 @@ G_BEGIN_DECLS
  * and the read-only "has-selection". The setters below are conveniences
  * over them.
  *
- * The view is a #GtkScrollable, so it goes in a #GtkScrolledWindow.
+ * The view is a [iface@Gtk.Scrollable], so it goes in a
+ * [class@Gtk.ScrolledWindow].
  *
- * Rows are added from C with rotulus_view_append() and a #RotulusRow
+ * Rows are added from C with [method@Rotulus.View.append] and a [struct@Rotulus.Row]
  * built on the stack, or, from C or a language binding, with
- * rotulus_view_append_message() and a #RotulusMessage.
+ * [method@Rotulus.View.append_message] and a [struct@Rotulus.Message].
  */
 #define ROTULUS_TYPE_VIEW (rotulus_view_get_type ())
 G_DECLARE_FINAL_TYPE (RotulusView, rotulus_view, ROTULUS, VIEW, GtkWidget)
@@ -57,7 +58,7 @@ G_DECLARE_FINAL_TYPE (RotulusView, rotulus_view, ROTULUS, VIEW, GtkWidget)
  * @ROTULUS_LOAD_OLDER: the application should load older rows
  * @ROTULUS_LOAD_NEWER: the application should load newer rows
  *
- * Which way a #RotulusView::load-more request pages.
+ * Which way a [signal@Rotulus.View::load-more] request pages.
  */
 typedef enum {
     ROTULUS_LOAD_OLDER,
@@ -72,7 +73,7 @@ GType rotulus_load_direction_get_type (void);
  * @self: the view
  * @href: the link's target
  *
- * A primary click on a link, when #RotulusView:activate-links is on.
+ * A primary click on a link, when [property@Rotulus.View:activate-links] is on.
  *
  * Returns: %TRUE to say the link was handled; otherwise the view opens it
  *   with the desktop's handler
@@ -146,25 +147,123 @@ GType rotulus_load_direction_get_type (void);
  * defaults of their own.
  *
  * Keep each one a plain number: the crate's tests parse them. */
+/**
+ * ROTULUS_PAL_MIRC_COLS:
+ *
+ * How many palette slots the mIRC colors take, from slot 0, so that IRC
+ * formatting can address them by number.
+ */
 #define ROTULUS_PAL_MIRC_COLS 32
-#define ROTULUS_PAL_MARK_FG 32        /* selection foreground */
-#define ROTULUS_PAL_MARK_BG 33        /* selection background */
-#define ROTULUS_PAL_FG 34             /* default text foreground */
-#define ROTULUS_PAL_BG 35             /* default text background */
-#define ROTULUS_PAL_MARKER 36         /* last-read marker line */
-#define ROTULUS_PAL_MUTED 37          /* secondary text: history, captions */
-#define ROTULUS_PAL_TIMESTAMP 38      /* timestamp column */
-#define ROTULUS_PAL_NICK 39           /* other people's nicks */
-#define ROTULUS_PAL_SELF_NICK 40      /* your own nick */
-#define ROTULUS_PAL_NICK_BRACKET 41   /* < > around other people's nicks */
-#define ROTULUS_PAL_SELF_BRACKET 42   /* < > around your own nick */
-#define ROTULUS_PAL_SYSTEM 43         /* the tag of a status line */
-#define ROTULUS_PAL_SYSTEM_BRACKET 44 /* the brackets around it */
-#define ROTULUS_PAL_HIGHLIGHT 45      /* nick on a line that mentions you */
-#define ROTULUS_PAL_RULE 46           /* the column divider */
-#define ROTULUS_PAL_NICK_COLOR0 47    /* first of the per-nick colors */
-#define ROTULUS_PAL_NICK_COLORS 8     /* how many per-nick slots follow */
-#define ROTULUS_PAL_COLS 55           /* 32 mIRC + roles + nick colors */
+/**
+ * ROTULUS_PAL_MARK_FG:
+ *
+ * The palette slot for the selection's foreground.
+ */
+#define ROTULUS_PAL_MARK_FG 32
+/**
+ * ROTULUS_PAL_MARK_BG:
+ *
+ * The palette slot for the selection's background.
+ */
+#define ROTULUS_PAL_MARK_BG 33
+/**
+ * ROTULUS_PAL_FG:
+ *
+ * The palette slot for the default text color.
+ */
+#define ROTULUS_PAL_FG 34
+/**
+ * ROTULUS_PAL_BG:
+ *
+ * The palette slot for the default background.
+ */
+#define ROTULUS_PAL_BG 35
+/**
+ * ROTULUS_PAL_MARKER:
+ *
+ * The palette slot for the last-read marker line.
+ */
+#define ROTULUS_PAL_MARKER 36
+/**
+ * ROTULUS_PAL_MUTED:
+ *
+ * The palette slot for secondary text: history rows and captions.
+ */
+#define ROTULUS_PAL_MUTED 37
+/**
+ * ROTULUS_PAL_TIMESTAMP:
+ *
+ * The palette slot for the timestamp column.
+ */
+#define ROTULUS_PAL_TIMESTAMP 38
+/**
+ * ROTULUS_PAL_NICK:
+ *
+ * The palette slot for other people's nicks.
+ */
+#define ROTULUS_PAL_NICK 39
+/**
+ * ROTULUS_PAL_SELF_NICK:
+ *
+ * The palette slot for your own nick.
+ */
+#define ROTULUS_PAL_SELF_NICK 40
+/**
+ * ROTULUS_PAL_NICK_BRACKET:
+ *
+ * The palette slot for the brackets around other people's nicks.
+ */
+#define ROTULUS_PAL_NICK_BRACKET 41
+/**
+ * ROTULUS_PAL_SELF_BRACKET:
+ *
+ * The palette slot for the brackets around your own nick.
+ */
+#define ROTULUS_PAL_SELF_BRACKET 42
+/**
+ * ROTULUS_PAL_SYSTEM:
+ *
+ * The palette slot for the tag of a status line.
+ */
+#define ROTULUS_PAL_SYSTEM 43
+/**
+ * ROTULUS_PAL_SYSTEM_BRACKET:
+ *
+ * The palette slot for the brackets around a status line's tag.
+ */
+#define ROTULUS_PAL_SYSTEM_BRACKET 44
+/**
+ * ROTULUS_PAL_HIGHLIGHT:
+ *
+ * The palette slot for the nick on a line that mentions you.
+ */
+#define ROTULUS_PAL_HIGHLIGHT 45
+/**
+ * ROTULUS_PAL_RULE:
+ *
+ * The palette slot for the column divider.
+ */
+#define ROTULUS_PAL_RULE 46
+/**
+ * ROTULUS_PAL_NICK_COLOR0:
+ *
+ * The first of the per-nick color slots.
+ */
+#define ROTULUS_PAL_NICK_COLOR0 47
+/**
+ * ROTULUS_PAL_NICK_COLORS:
+ *
+ * How many per-nick color slots there are, from
+ * %ROTULUS_PAL_NICK_COLOR0.
+ */
+#define ROTULUS_PAL_NICK_COLORS 8
+/**
+ * ROTULUS_PAL_COLS:
+ *
+ * How many colors a palette holds: the mIRC colors, the roles, and the
+ * per-nick colors. [method@Rotulus.View.set_palette] takes this many.
+ */
+#define ROTULUS_PAL_COLS 55
 
 /* ---- runs --------------------------------------------------------- *
  *
@@ -175,23 +274,72 @@ GType rotulus_load_direction_get_type (void);
  * of ROTULUS_ATTR_* bits; the last three say which of a run's other
  * color fields apply. */
 
+/**
+ * ROTULUS_COLOR_DEFAULT:
+ *
+ * A run color meaning the view's default text color.
+ */
 #define ROTULUS_COLOR_DEFAULT (-1)
-
+/**
+ * ROTULUS_ATTR_NONE:
+ *
+ * No attributes.
+ */
 #define ROTULUS_ATTR_NONE 0u
+/**
+ * ROTULUS_ATTR_BOLD:
+ *
+ * Bold text.
+ */
 #define ROTULUS_ATTR_BOLD (1u << 0)
+/**
+ * ROTULUS_ATTR_ITALIC:
+ *
+ * Italic text.
+ */
 #define ROTULUS_ATTR_ITALIC (1u << 1)
+/**
+ * ROTULUS_ATTR_UNDERLINE:
+ *
+ * Underlined text.
+ */
 #define ROTULUS_ATTR_UNDERLINE (1u << 2)
+/**
+ * ROTULUS_ATTR_STRIKETHROUGH:
+ *
+ * Struck-through text.
+ */
 #define ROTULUS_ATTR_STRIKETHROUGH (1u << 3)
+/**
+ * ROTULUS_ATTR_MONOSPACE:
+ *
+ * Monospace text, as for code.
+ */
 #define ROTULUS_ATTR_MONOSPACE (1u << 4)
-/* Swap the foreground and background. */
+/**
+ * ROTULUS_ATTR_REVERSE:
+ *
+ * Swap the run's foreground and background.
+ */
 #define ROTULUS_ATTR_REVERSE (1u << 5)
-/* `background` holds a palette index for the run's background. */
+/**
+ * ROTULUS_ATTR_BACKGROUND:
+ *
+ * The run's `background` is a palette index for its background.
+ */
 #define ROTULUS_ATTR_BACKGROUND (1u << 8)
-/* `rgb` is the foreground, 0xRRGGBB, instead of `color`. */
+/**
+ * ROTULUS_ATTR_RGB:
+ *
+ * The run's `rgb` is its foreground, as 0xRRGGBB, instead of `color`.
+ */
 #define ROTULUS_ATTR_RGB (1u << 9)
-/* `background_rgb` is the background, 0xRRGGBB. */
+/**
+ * ROTULUS_ATTR_BACKGROUND_RGB:
+ *
+ * The run's `background_rgb` is its background, as 0xRRGGBB.
+ */
 #define ROTULUS_ATTR_BACKGROUND_RGB (1u << 10)
-
 /**
  * RotulusRun:
  * @text: the text, borrowed for the call
@@ -219,6 +367,7 @@ typedef struct {
     guint32 background_rgb;
 } RotulusRun;
 
+#ifndef __GI_SCANNER__
 /* A run with the four common fields; the rest are zero. Designated,
  * so -Wmissing-field-initializers has nothing to say about them. */
 #define ROTULUS_RUN(t, l, c, a)                                                \
@@ -227,6 +376,7 @@ typedef struct {
 /* The common "one unstyled run" case. */
 #define ROTULUS_RUN_PLAIN(t, l)                                                \
     ROTULUS_RUN ((t), (l), ROTULUS_COLOR_DEFAULT, ROTULUS_ATTR_NONE)
+#endif
 
 /* ---- rows --------------------------------------------------------- */
 
@@ -236,11 +386,11 @@ typedef struct {
  * @ROTULUS_ROW_SYSTEM: a notice the application generated; never groups
  *   with its neighbours, even when they share a tag
  * @ROTULUS_ROW_HISTORY: a message loaded from history; doesn't count
- *   against #RotulusView:max-lines, and is never trimmed to make room for
+ *   against [property@Rotulus.View:max-lines], and is never trimmed to make room for
  *   live rows
  * @ROTULUS_ROW_DIVIDER: a rule with a caption, framing a block of history
  * @ROTULUS_ROW_LOAD_OLDER: a row that asks for older rows when clicked;
- *   see #RotulusView::load-more
+ *   see [signal@Rotulus.View::load-more]
  * @ROTULUS_ROW_LOAD_NEWER: the same, for newer rows
  *
  * What a row is.
@@ -254,14 +404,21 @@ typedef enum {
     ROTULUS_ROW_LOAD_NEWER,
 } RotulusRowKind;
 
-/* The row originated here rather than arriving from elsewhere. It
+/**
+ * ROTULUS_ROW_OUTGOING:
+ *
+ * The row originated here rather than arriving from elsewhere. It
  * breaks grouping independently of who the speaker is: in a
  * conversation with yourself, both halves have the same speaker, and
- * only direction tells your echo from the copy that came back. */
+ * only direction tells your echo from the copy that came back.
+ */
 #define ROTULUS_ROW_OUTGOING (1u << 0)
-/* A "/me" action: never groups. */
+/**
+ * ROTULUS_ROW_ACTION:
+ *
+ * A "/me" action. It never groups with its neighbors.
+ */
 #define ROTULUS_ROW_ACTION (1u << 1)
-
 /**
  * RotulusSpeaker:
  * @key: the application's identity for the person, or 0 when it has none
@@ -279,7 +436,9 @@ typedef struct {
     int nick_len;
 } RotulusSpeaker;
 
+#ifndef __GI_SCANNER__
 #define ROTULUS_SPEAKER_NONE ((RotulusSpeaker){ 0, NULL, -1 })
+#endif
 
 /**
  * RotulusRow:
@@ -292,7 +451,7 @@ typedef struct {
  * @body: the runs of the body
  * @n_body: how many there are
  *
- * A row, for the C row API. Language bindings use #RotulusMessage.
+ * A row, for the C row API. Language bindings use [struct@Rotulus.Message].
  */
 typedef struct {
     RotulusRowKind kind;
@@ -309,8 +468,8 @@ typedef struct {
  * RotulusMark:
  *
  * An opaque handle to a row. A mark stays valid until the row it names
- * goes (removed, trimmed by #RotulusView:max-lines, or cleared), and is
- * weak: using a stale one is a safe no-op, and rotulus_view_remove()
+ * goes (removed, trimmed by [property@Rotulus.View:max-lines], or cleared), and is
+ * weak: using a stale one is a safe no-op, and [method@Rotulus.View.remove]
  * returning %FALSE is the intended way to find out.
  *
  * A mark is an id rather than a pointer to anything. It is a boxed type
@@ -328,7 +487,7 @@ GType rotulus_mark_get_type (void);
  * RotulusMessage:
  *
  * A row under construction: the introspectable counterpart of
- * #RotulusRow. Build one, hand it to rotulus_view_append_message(), and
+ * [struct@Rotulus.Row]. Build one, hand it to [method@Rotulus.View.append_message], and
  * free it; the view copies what it needs.
  */
 typedef struct _RotulusMessage RotulusMessage;
@@ -379,7 +538,7 @@ void rotulus_message_set_timestamp (RotulusMessage *self, gint64 stamp);
  * @key: the application's identity for the person, or 0 when it has none
  * @nick: (nullable): their nick
  *
- * Says who sent it. See #RotulusSpeaker.
+ * Says who sent it. See [struct@Rotulus.Speaker].
  */
 void rotulus_message_set_speaker (RotulusMessage *self, guint64 key,
                                   const char *nick);
@@ -415,7 +574,7 @@ void rotulus_message_add_text (RotulusMessage *self, const char *text,
  * @text: text carrying IRC formatting codes
  *
  * Adds @text to the body, styled by its IRC formatting codes, with the
- * codes removed. See rotulus_mirc_parse().
+ * codes removed. See [func@Rotulus.mirc_parse].
  */
 void rotulus_message_add_mirc (RotulusMessage *self, const char *text);
 
@@ -426,7 +585,7 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (RotulusMessage, rotulus_message_free)
 /**
  * rotulus_view_new:
  *
- * Returns: a new #RotulusView
+ * Returns: a new [class@Rotulus.View]
  */
 GtkWidget *rotulus_view_new (void);
 
@@ -508,8 +667,12 @@ void rotulus_view_set_timestamp_format (RotulusView *self,
  * Only the first row of a group draws one.
  */
 void rotulus_view_set_avatar_size (RotulusView *self, int px);
+/**
+ * ROTULUS_AVATAR_SIZE_DEFAULT:
+ *
+ * The default [property@Rotulus.View:avatar-size], in pixels.
+ */
 #define ROTULUS_AVATAR_SIZE_DEFAULT 32
-
 /**
  * rotulus_view_set_group_gap:
  * @self: a view
@@ -517,8 +680,12 @@ void rotulus_view_set_avatar_size (RotulusView *self, int px);
  *   0 turns grouping off
  */
 void rotulus_view_set_group_gap (RotulusView *self, int secs);
+/**
+ * ROTULUS_GROUP_GAP_DEFAULT:
+ *
+ * The default [property@Rotulus.View:group-gap], in seconds.
+ */
 #define ROTULUS_GROUP_GAP_DEFAULT 300
-
 /**
  * rotulus_view_set_markdown:
  * @self: a view
@@ -575,7 +742,7 @@ void rotulus_view_set_zoom (RotulusView *self, double zoom);
  * RotulusAvatarFunc:
  * @view: the view
  * @key: a speaker's key
- * @user_data: the data passed to rotulus_view_set_avatar_func()
+ * @user_data: the data passed to [method@Rotulus.View.set_avatar_func]
  *
  * Resolves a speaker's key to the image in their avatar slot. Called on
  * every draw, so an animated avatar animates; cache anything expensive.
@@ -601,7 +768,7 @@ void rotulus_view_set_avatar_func (RotulusView *self, RotulusAvatarFunc func,
  * rotulus_view_get_vadjustment:
  * @self: a view
  *
- * The vertical adjustment, for a #GtkScrollbar beside the view, created
+ * The vertical adjustment, for a [class@Gtk.Scrollbar] beside the view, created
  * if the view has none.
  *
  * Returns: (transfer none): the adjustment
@@ -665,7 +832,7 @@ RotulusMark *rotulus_view_append_message (RotulusView *self,
  * @anchor: (nullable): the row to insert before; %NULL inserts at the top
  * @message: the row
  *
- * As rotulus_view_insert_before().
+ * As [method@Rotulus.View.insert_before].
  *
  * Returns: (transfer none): a mark for the new row
  */
@@ -679,7 +846,7 @@ RotulusMark *rotulus_view_insert_message_before (RotulusView *self,
  * @mark: the row to replace
  * @message: its new content
  *
- * As rotulus_view_replace().
+ * As [method@Rotulus.View.replace].
  *
  * Returns: %FALSE if the row is gone
  */
@@ -849,7 +1016,7 @@ void rotulus_view_search_clear (RotulusView *self);
  * which must outlive them. Colors 0..15 address the palette's mIRC
  * slots; the extended colors and hex colors are RGB.
  *
- * Returns: (transfer full): the runs; free the array with g_free()
+ * Returns: (transfer full): the runs; free the array with [func@GLib.free]
  */
 RotulusRun *rotulus_mirc_parse (const char *text, int len, int *n_runs);
 
