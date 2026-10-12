@@ -3893,3 +3893,113 @@ fn scan_finds_bare_email_addresses() {
     );
     assert_eq!(l.normalize("bob@example.com"), "mailto:bob@example.com");
 }
+
+// ------------------------------------------------------------------ focus
+
+#[test]
+fn focus_steps_through_items_in_reading_order_and_off_the_ends() {
+    use crate::focus::FocusItem;
+    use crate::message::LoadMoreDirection;
+    use crate::wrap::LineSource;
+
+    let m = FixedMeasure::new(10);
+    let mut b = ChatBuffer::new(params(2000));
+    b.set_group_gap_secs(300, &m);
+    let load = b.append(
+        Message {
+            kind: crate::message::MessageKind::LoadMore(LoadMoreDirection::Older),
+            ..Message::system(ParsedText::plain("load older, https://not.a.link"))
+        },
+        &m,
+    );
+    let mut body = ParsedText::plain("see b and a");
+    body.add_link(10..11, "https://a.example");
+    body.add_link(4..5, "https://b.example");
+    let al = b.append(
+        Message {
+            blocks: vec![
+                Block::Text(body),
+                Block::Code {
+                    text: "https://code.example".into(),
+                    language: None,
+                },
+                Block::Image {
+                    token: 3,
+                    size: None,
+                    alt: "pic".into(),
+                },
+            ]
+            .into(),
+            ..said(1, "al", "", 100)
+        },
+        &m,
+    );
+    // Grouped under al's first row, so no speaker of its own, and no
+    // links: nothing to stop on.
+    b.append(said(1, "al", "more", 110), &m);
+    // A system line has no speaker to activate.
+    b.append(said(0, "", "joined", 120), &m);
+    let bo = b.append(said(2, "bo", "hi", 130), &m);
+
+    let link = |range: std::ops::Range<usize>| FocusItem::Link {
+        message: al,
+        source: LineSource::Block(0),
+        range,
+    };
+    let order = [
+        FocusItem::LoadMore { message: load },
+        FocusItem::Speaker { message: al },
+        link(4..5),
+        link(10..11),
+        FocusItem::Image {
+            message: al,
+            block: 2,
+        },
+        FocusItem::Speaker { message: bo },
+    ];
+
+    let all = (0, b.len() - 1);
+    let mut seen = vec![b.step_focus(None, true, all).unwrap()];
+    while let Some(next) = b.step_focus(seen.last(), true, all) {
+        seen.push(next);
+    }
+    assert_eq!(
+        seen, order,
+        "forward, in reading order, and then off the end"
+    );
+
+    let mut back = vec![b.step_focus(None, false, all).unwrap()];
+    while let Some(prev) = b.step_focus(back.last(), false, all) {
+        back.push(prev);
+    }
+    back.reverse();
+    assert_eq!(back, order, "backward visits the same items");
+
+    // Only what is on screen: rows 1 to 3 here.
+    let shown = (1, 3);
+    assert_eq!(
+        b.step_focus(None, true, shown),
+        Some(order[1].clone()),
+        "entering starts at the first item on screen"
+    );
+    assert_eq!(
+        b.step_focus(None, false, shown),
+        Some(order[4].clone()),
+        "and going back, at the last"
+    );
+    assert_eq!(
+        b.step_focus(Some(&order[4]), true, shown),
+        None,
+        "past the last row on screen, focus leaves"
+    );
+    assert_eq!(
+        b.step_focus(Some(&order[1]), false, shown),
+        None,
+        "and before the first"
+    );
+    assert_eq!(
+        b.step_focus(Some(&order[5]), true, shown),
+        Some(order[1].clone()),
+        "an item scrolled away starts again from what is on screen"
+    );
+}

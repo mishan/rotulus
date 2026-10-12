@@ -8,5 +8,7 @@ i18n.gettext('rotulus',
     '--directory=' + meson.current_source_dir() / '..',
     '--from-code=UTF-8',
     '--keyword=tr:1',
+    '--keyword=trc:1c,2',
+    '--add-comments=Translators:',
   ],
 )

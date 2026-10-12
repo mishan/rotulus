@@ -128,8 +128,10 @@ let view = RotulusView::new();
 view.append(Message::live(Speaker::new(42, "alice"), ParsedText::plain("hello")));
 ```
 
-The view is a GtkScrollable, so put it in a GtkScrolledWindow. The
-application reacts through signals:
+The view is a GtkScrollable, so put it in a GtkScrolledWindow. Leave it
+focusable: Tab steps through its links, speakers, images and load-more
+rows, and Enter activates them as a click does. The application reacts
+through signals:
 
 - `link-activated`, `link-menu`
 - `speaker-activated`, `speaker-menu`

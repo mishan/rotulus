@@ -65,6 +65,7 @@
 
 pub mod anchor;
 pub mod buffer;
+pub mod focus;
 pub mod index;
 pub mod linkify;
 pub mod markdown;
@@ -80,6 +81,7 @@ mod tests;
 
 pub use anchor::{Gravity, ScrollAnchor};
 pub use buffer::{ChatBuffer, MIN_INDENT};
+pub use focus::FocusItem;
 pub use index::HeightIndex;
 pub use linkify::{Linkifier, DEFAULT_SCHEMES};
 pub use markdown::{scan_delims, SourceSpan};

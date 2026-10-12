@@ -21,3 +21,27 @@ msgstr "Abrir el enlace en el navegador"
 
 msgid "Copy Link"
 msgstr "Copiar enlace"
+
+msgctxt "accessible role"
+msgid "user"
+msgstr "usuario"
+
+msgctxt "accessible role"
+msgid "link"
+msgstr "enlace"
+
+msgctxt "accessible role"
+msgid "button"
+msgstr "botón"
+
+msgctxt "accessible role"
+msgid "image"
+msgstr "imagen"
+
+msgctxt "item announcement"
+msgid "{text}, {kind}"
+msgstr "{text}, {kind}"
+
+msgctxt "zoom level"
+msgid "{percent}%"
+msgstr "{percent} %"

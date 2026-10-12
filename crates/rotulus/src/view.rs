@@ -20,8 +20,8 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
 use rotulus_layout::{
-    Caret, ChatBuffer, ColorRef, LayoutParams, LineSource, Message, MessageId, ParsedText,
-    RowSelection, Selection, Span, Style, TextMeasure, MIN_INDENT,
+    Caret, ChatBuffer, ColorRef, FocusItem, LayoutParams, LineSource, Message, MessageId,
+    ParsedText, RowSelection, Selection, Span, Style, TextMeasure, MIN_INDENT,
 };
 
 use crate::measure::PangoMeasure;
@@ -386,6 +386,9 @@ pub(crate) mod imp {
         /// caret: the current search match.
         #[cfg(feature = "v4_14")]
         pub(crate) a11y_caret: Cell<Option<Selection>>,
+        /// The item keyboard focus is on, when the view has focus and
+        /// isn't on the view as a whole.
+        pub(crate) focus_item: RefCell<Option<FocusItem>>,
         /// The desktop settings this view follows, and its handlers on
         /// them, to disconnect when the view goes.
         pub settings_handlers: RefCell<Option<(gtk4::Settings, Vec<glib::SignalHandlerId>)>>,
@@ -434,6 +437,7 @@ pub(crate) mod imp {
                 a11y: RefCell::new(None),
                 #[cfg(feature = "v4_14")]
                 a11y_caret: Cell::new(None),
+                focus_item: RefCell::new(None),
                 settings_handlers: RefCell::new(None),
             }
         }
@@ -551,6 +555,7 @@ pub(crate) mod imp {
             obj.install_selection_gestures();
             obj.install_zoom_bindings();
             obj.install_link_handlers();
+            obj.install_keyboard();
             obj.watch_settings();
         }
 
@@ -804,6 +809,7 @@ pub(crate) mod imp {
             let before = std::mem::take(&mut *self.drawn_media.borrow_mut());
             obj.snapshot_content(snapshot);
             // Chrome, drawn over the content and outside its clip.
+            obj.snapshot_focus(snapshot);
             obj.snapshot_zoom_badge(snapshot, obj.width(), obj.height());
             // An image back on screen restarts its current frame rather
             // than jumping past it: its clock stopped while it was away.
@@ -818,6 +824,14 @@ pub(crate) mod imp {
             }
             // What was drawn decides whether anything needs to animate.
             obj.sync_animation_tick();
+        }
+
+        fn focus(&self, direction: gtk4::DirectionType) -> bool {
+            match direction {
+                gtk4::DirectionType::TabForward => self.obj().focus_step(true),
+                gtk4::DirectionType::TabBackward => self.obj().focus_step(false),
+                _ => self.parent_focus(direction),
+            }
         }
 
         fn unmap(&self) {
@@ -938,6 +952,7 @@ impl RotulusView {
             self.imp_().buffer.borrow_mut().set_max_rows(cap, &*m);
         }
         if self.len() != before {
+            self.drop_stale_focus();
             self.after_content_change();
             self.a11y_reset();
         }
@@ -992,7 +1007,7 @@ impl RotulusView {
         self.queue_resize();
         if zoom != was {
             self.flash_zoom_badge();
-            self.a11y_announce(&format!("{}%", (self.zoom_permille() + 5) / 10));
+            self.a11y_announce(&zoom_label(self.zoom_permille()));
         }
     }
 
@@ -1071,8 +1086,7 @@ impl RotulusView {
             1.0
         };
 
-        let pct = (self.zoom_permille() + 5) / 10;
-        let layout = self.create_pango_layout(Some(&format!("{pct}%")));
+        let layout = self.create_pango_layout(Some(&zoom_label(self.zoom_permille())));
         let (tw, th) = layout.pixel_size();
 
         let pad = 8.0;
@@ -1364,6 +1378,9 @@ impl RotulusView {
         // The buffer grows by exactly one row unless the append trimmed
         // the oldest ones to make room.
         let trimmed = (before + 1).saturating_sub(imp.buffer.borrow().len());
+        if trimmed > 0 {
+            self.drop_stale_focus();
+        }
         self.after_content_change();
         self.a11y_appended(id, trimmed);
         id
@@ -1390,6 +1407,10 @@ impl RotulusView {
             if self.imp_().marker.get() == Some(id) {
                 self.imp_().marker.set(None);
             }
+            self.imp_()
+                .focus_item
+                .borrow_mut()
+                .take_if(|i| i.message() == id);
             self.after_content_change();
             self.a11y_removed(id);
         }
@@ -1413,6 +1434,11 @@ impl RotulusView {
             // point at different bytes.
             self.imp_().search.borrow_mut().clear();
             self.clear_selection();
+            // A focused link may not be there any more.
+            self.imp_()
+                .focus_item
+                .borrow_mut()
+                .take_if(|i| i.message() == id);
             self.after_content_change();
             self.a11y_replaced(id);
         }
@@ -1458,6 +1484,7 @@ impl RotulusView {
     pub fn clear(&self) {
         self.imp_().buffer.borrow_mut().clear();
         self.imp_().marker.set(None);
+        self.imp_().focus_item.replace(None);
         self.clear_selection();
         // Textures are keyed by token, and tokens are per-conversation
         // and reused after a clear — holding stale ones would both leak
@@ -2201,7 +2228,6 @@ impl RotulusView {
 
 /// Width of `range` of one of a row's texts, measured a run at a time in
 /// the styles it is drawn in, so a box drawn around bold text fits it.
-#[cfg_attr(not(feature = "v4_16"), allow(dead_code))]
 fn styled_width(
     m: &PangoMeasure,
     msg: &Message,
@@ -2432,10 +2458,6 @@ impl RotulusView {
     }
 
     fn install_selection_gestures(&self) {
-        // The widget has to be focusable for a key controller to reach
-        // it; xtext's consumers call gtk_widget_set_can_focus(FALSE) to
-        // keep the input box focused, so Ctrl+C is bound on the widget
-        // rather than requiring focus.
         let drag = gtk4::GestureDrag::new();
         drag.set_button(gtk4::gdk::BUTTON_PRIMARY);
 
@@ -2630,8 +2652,8 @@ impl RotulusView {
         // Ctrl+C.
         //
         // A ShortcutController on this widget does not work, global
-        // scope or not: a chat application makes the view unfocusable
-        // so typing goes to the input, the input is a GtkTextView with
+        // scope or not: focus usually sits in a chat application's
+        // input, not here, the input is a GtkTextView with
         // its own Ctrl+C binding, and being the focused widget it
         // consumes the key first — copying its own (empty) selection.
         //
@@ -2691,9 +2713,8 @@ impl RotulusView {
     /// Page/Home/End handling for the capture-phase root controller.
     ///
     /// These keys have to be stolen from the focus path rather than
-    /// bound here, because consumers call
-    /// `gtk_widget_set_can_focus(FALSE)` on the chat view so the message
-    /// input keeps focus — and GtkTextView binds Page_Up/Page_Down to
+    /// bound here, because focus usually sits in the message input —
+    /// and GtkTextView binds Page_Up/Page_Down to
     /// its own cursor movement, so a global-scope GtkShortcut (which
     /// runs *after* normal propagation) would never fire: the widget that
     /// has focus swallows it.
@@ -3042,6 +3063,14 @@ enum ClipboardTarget {
 
 // ---- zoom -------------------------------------------------------------
 
+/// A zoom level as people read it, "150%".
+fn zoom_label(permille: u32) -> String {
+    let percent = ((permille + 5) / 10).to_string();
+    // Translators: a zoom level; some languages put a space before the
+    // percent sign.
+    crate::trc("zoom level", "{percent}%").replace("{percent}", &percent)
+}
+
 /// Zoom steps, per-mille. The browser/terminal ladder people already
 /// have muscle memory for.
 const ZOOM_STEPS: [u32; 13] = [
@@ -3241,23 +3270,12 @@ impl RotulusView {
                 let Some(this) = this.upgrade() else {
                     return;
                 };
-                match this.hover_target_at(x, y) {
-                    // A nick outranks everything: the gutter is where nicks
-                    // live, and the person's menu is what a right-click
-                    // there means.
-                    Some(HoverTarget::Nick { key, .. })
-                        if button == gtk4::gdk::BUTTON_SECONDARY =>
-                    {
-                        this.emit_by_name::<()>("speaker-menu", &[&key, &x, &y]);
-                    }
-                    Some(HoverTarget::Link { href, .. }) => {
-                        let handled: bool = this.emit_by_name("link-menu", &[&href, &x, &y]);
-                        if !handled {
-                            this.show_link_menu(&href, x, y);
-                        }
-                    }
-                    _ if button == gtk4::gdk::BUTTON_SECONDARY => this.show_context_menu(x, y),
-                    _ => {}
+                let target = this.hover_target_at(x, y);
+                // A middle click only has the link menu.
+                if button == gtk4::gdk::BUTTON_SECONDARY
+                    || matches!(target, Some(HoverTarget::Link { .. }))
+                {
+                    this.open_menu(target, x, y);
                 }
             });
             self.add_controller(click);
@@ -3335,7 +3353,13 @@ impl RotulusView {
 
     /// Act on a primary click at a widget-space point.
     pub(crate) fn activate_at(&self, x: f64, y: f64) {
-        match self.hover_target_at(x, y) {
+        self.activate(self.hover_target_at(x, y), x, y);
+    }
+
+    /// Act on `target` as a primary click on it would, at a widget-space
+    /// point a menu can open from.
+    fn activate(&self, target: Option<HoverTarget>, x: f64, y: f64) {
+        match target {
             Some(HoverTarget::Link { .. }) if !self.imp_().activate_links.get() => {}
             // A link whose text isn't its address shows where it goes
             // before anything opens: the menu, headed by the real URL.
@@ -3365,6 +3389,24 @@ impl RotulusView {
                 self.emit_by_name::<()>("media-activated", &[&token]);
             }
             None => {}
+        }
+    }
+
+    /// The menu for `target`, as a secondary click on it opens: a
+    /// person's menu over a nick, the link menu over a link, the view's
+    /// own otherwise.
+    fn open_menu(&self, target: Option<HoverTarget>, x: f64, y: f64) {
+        match target {
+            Some(HoverTarget::Nick { key, .. }) => {
+                self.emit_by_name::<()>("speaker-menu", &[&key, &x, &y]);
+            }
+            Some(HoverTarget::Link { href, .. }) => {
+                let handled: bool = self.emit_by_name("link-menu", &[&href, &x, &y]);
+                if !handled {
+                    self.show_link_menu(&href, x, y);
+                }
+            }
+            _ => self.show_context_menu(x, y),
         }
     }
 
@@ -3547,7 +3589,15 @@ impl RotulusView {
         // keeps the view alive. Safe synchronously here — the click has
         // already run its callback, which is not true of an action
         // resolved through the hierarchy.
-        popover.connect_closed(|p| p.unparent());
+        // Focus goes back where the menu was opened from, the view (and
+        // its focused item), rather than to wherever GTK would put it.
+        let refocus = self.is_focus().then(|| self.downgrade());
+        popover.connect_closed(move |p| {
+            p.unparent();
+            if let Some(view) = refocus.as_ref().and_then(|v| v.upgrade()) {
+                view.grab_focus();
+            }
+        });
         popover.popup();
     }
 
@@ -3607,10 +3657,9 @@ fn install_menu_css() {
 /// the alignment has nothing to bite on and the row still reads as a
 /// centred caption.
 ///
-/// Focus is off for the same reason it is off there: the first item
-/// takes focus when the popover opens and paints a focus ring, which
-/// reads as "this item is hovered" and then fails to follow the
-/// pointer. These menus are pointer-driven — right-click, click.
+/// Focusable, so a menu opened from the keyboard can be used from it.
+/// Opened by a click, the first row takes focus without showing a ring,
+/// since GTK draws one only once the keyboard has been used.
 fn menu_row(label: &str, enabled: bool) -> gtk4::Button {
     install_menu_css();
 
@@ -3620,13 +3669,386 @@ fn menu_row(label: &str, enabled: bool) -> gtk4::Button {
     b.set_has_frame(false);
     b.set_halign(gtk4::Align::Fill);
     b.set_sensitive(enabled);
-    b.set_focusable(false);
-    b.set_can_focus(false);
     if let Some(l) = b.child().and_then(|c| c.downcast::<gtk4::Label>().ok()) {
         l.set_xalign(0.0);
         l.set_hexpand(true);
     }
     b
+}
+
+// ---- keyboard ---------------------------------------------------------
+
+impl RotulusView {
+    fn install_keyboard(&self) {
+        self.set_focusable(true);
+
+        let key = gtk4::EventControllerKey::new();
+        let this = self.downgrade();
+        key.connect_key_pressed(move |_, keyval, _, state| {
+            use gtk4::gdk::Key;
+            let Some(this) = this.upgrade() else {
+                return glib::Propagation::Proceed;
+            };
+            let ctrl = state.contains(gtk4::gdk::ModifierType::CONTROL_MASK);
+            let shift = state.contains(gtk4::gdk::ModifierType::SHIFT_MASK);
+            let handled = match keyval {
+                Key::Return | Key::KP_Enter | Key::ISO_Enter | Key::space | Key::KP_Space
+                    if !ctrl =>
+                {
+                    this.activate_focused()
+                }
+                Key::Menu => {
+                    this.open_focused_menu();
+                    true
+                }
+                Key::F10 if shift => {
+                    this.open_focused_menu();
+                    true
+                }
+                Key::a | Key::A if ctrl => {
+                    this.select_all();
+                    true
+                }
+                Key::Escape => {
+                    let had = this.imp_().focus_item.borrow().is_some() || this.has_selection();
+                    this.set_focus_item(None);
+                    this.clear_selection();
+                    had
+                }
+                _ => false,
+            };
+            if handled {
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        self.add_controller(key);
+
+        // The focus ring comes and goes with focus.
+        let focus = gtk4::EventControllerFocus::new();
+        focus.connect_enter(|c| {
+            if let Some(w) = c.widget() {
+                w.queue_draw();
+            }
+        });
+        focus.connect_leave(|c| {
+            if let Some(w) = c.widget() {
+                w.queue_draw();
+            }
+        });
+        self.add_controller(focus);
+    }
+
+    /// Move keyboard focus one stop along, for Tab (`forward`) or
+    /// Shift+Tab. The stops are the view as a whole — where the scrolling
+    /// keys work and a screen reader reads the log — and then each item on
+    /// screen in reading order. Tab from outside lands on the view, and
+    /// Shift+Tab on the last item; stepping past either end returns
+    /// `false`, and GTK moves focus on to the neighboring widget.
+    pub(crate) fn focus_step(&self, forward: bool) -> bool {
+        let entering = !self.is_focus();
+        let item = if entering {
+            None
+        } else {
+            self.imp_().focus_item.borrow().clone()
+        };
+        if entering && forward {
+            self.set_focus_item(None);
+            return self.grab_focus();
+        }
+        if !entering && item.is_none() && !forward {
+            return false;
+        }
+        let next = self.visible_rows().and_then(|rows| {
+            self.imp_()
+                .buffer
+                .borrow()
+                .step_focus(item.as_ref(), forward, rows)
+        });
+        if entering && !self.grab_focus() {
+            return false;
+        }
+        let moved = next.is_some();
+        self.set_focus_item(next);
+        moved || !forward
+    }
+
+    /// Let go of a focused item whose row is gone.
+    fn drop_stale_focus(&self) {
+        let imp = self.imp_();
+        let buf = imp.buffer.borrow();
+        imp.focus_item
+            .borrow_mut()
+            .take_if(|i| buf.row_of(i.message()).is_none());
+    }
+
+    /// The first and last rows on screen.
+    fn visible_rows(&self) -> Option<(usize, usize)> {
+        let height = content_height(self.height());
+        let mut buf = self.imp_().buffer.borrow_mut();
+        let top = buf.scroll_offset(height);
+        let first = buf.index_mut().locate(top)?.row;
+        let last = buf
+            .index_mut()
+            .locate(top + u64::from(height).saturating_sub(1))?
+            .row;
+        Some((first, last))
+    }
+
+    /// Put keyboard focus on `item`, scroll it into view and tell
+    /// assistive technology about it; `None` puts it on the view as a
+    /// whole.
+    fn set_focus_item(&self, item: Option<FocusItem>) {
+        let imp = self.imp_();
+        imp.focus_item.replace(item.clone());
+        if let Some(item) = item {
+            let height = content_height(self.height());
+            let m = imp.measure.borrow();
+            imp.buffer.borrow_mut().reveal(item.message(), height, &*m);
+            drop(m);
+            self.sync_adjustment(height);
+            self.announce_item(&item);
+        }
+        self.queue_draw();
+    }
+
+    /// Move the accessible caret to an item and say what it is.
+    fn announce_item(&self, item: &FocusItem) {
+        let (caret, text) = {
+            let buf = self.imp_().buffer.borrow();
+            let Some(msg) = buf.message(item.message()) else {
+                return;
+            };
+            let at = |source, offset| Caret {
+                message: item.message(),
+                source,
+                offset,
+            };
+            match item {
+                FocusItem::Speaker { .. } => (
+                    at(LineSource::Gutter, 0),
+                    msg.speaker
+                        .as_ref()
+                        .map(|s| s.nick.clone())
+                        .unwrap_or_default(),
+                ),
+                FocusItem::Link { source, range, .. } => {
+                    let Some((href, label)) = buf.link_at(&at(*source, range.start)) else {
+                        return;
+                    };
+                    let text = if self.imp_().linkifier.borrow().normalize(&label) == href {
+                        label
+                    } else {
+                        format!("{label} ({href})")
+                    };
+                    (at(*source, range.start), text)
+                }
+                FocusItem::LoadMore { .. } => (at(LineSource::Block(0), 0), msg.to_plain_text()),
+                FocusItem::Image { block, .. } => {
+                    let alt = match msg.blocks.get(*block) {
+                        Some(rotulus_layout::Block::Image { alt, .. }) => alt.clone(),
+                        _ => String::new(),
+                    };
+                    (at(LineSource::Block(*block), 0), alt)
+                }
+            }
+        };
+        let kind = match item {
+            FocusItem::Speaker { .. } => {
+                // Translators: this and the next three name what keyboard
+                // focus can land on in the chat view, read out by a screen
+                // reader after the item's text, the way it names a role.
+                crate::trc("accessible role", "user")
+            }
+            FocusItem::Link { .. } => crate::trc("accessible role", "link"),
+            FocusItem::LoadMore { .. } => crate::trc("accessible role", "button"),
+            FocusItem::Image { .. } => crate::trc("accessible role", "image"),
+        };
+        self.a11y_move_caret(Some(Selection::new(caret, caret)));
+        // Translators: what a screen reader says when keyboard focus lands
+        // on an item: its text, then what it is ("link", "user").
+        let said = crate::trc("item announcement", "{text}, {kind}");
+        self.a11y_announce(&said.replace("{text}", &text).replace("{kind}", &kind));
+    }
+
+    /// Enter or Space: do what a click on the focused item does. `false`
+    /// when focus is on no item.
+    pub(crate) fn activate_focused(&self) -> bool {
+        let item = self.imp_().focus_item.borrow().clone();
+        let Some((item, target)) = item.and_then(|i| Some((i.clone(), self.target_of(&i)?))) else {
+            return false;
+        };
+        let (x, y) = self.item_point(&item);
+        self.activate(Some(target), x, y);
+        true
+    }
+
+    /// What clicking `item` would have clicked.
+    fn target_of(&self, item: &FocusItem) -> Option<HoverTarget> {
+        let buf = self.imp_().buffer.borrow();
+        let msg = buf.message(item.message())?;
+        Some(match item {
+            FocusItem::Speaker { message } => HoverTarget::Nick {
+                message: *message,
+                key: msg.speaker.as_ref()?.key,
+            },
+            FocusItem::Link {
+                message,
+                source,
+                range,
+            } => {
+                let caret = Caret {
+                    message: *message,
+                    source: *source,
+                    offset: range.start,
+                };
+                let (href, label) = buf.link_at(&caret)?;
+                let disguised = self.imp_().linkifier.borrow().normalize(&label) != href;
+                HoverTarget::Link {
+                    message: *message,
+                    source: *source,
+                    range: range.clone(),
+                    href,
+                    disguised,
+                }
+            }
+            FocusItem::LoadMore { message } => match msg.kind {
+                rotulus_layout::MessageKind::LoadMore(d) => HoverTarget::LoadMore {
+                    message: *message,
+                    direction: d.into(),
+                },
+                _ => return None,
+            },
+            FocusItem::Image { message, block } => match msg.blocks.get(*block)? {
+                rotulus_layout::Block::Image { token, .. } => HoverTarget::Media {
+                    message: *message,
+                    token: *token,
+                },
+                _ => return None,
+            },
+        })
+    }
+
+    /// Menu, or Shift+F10: the menu a secondary click on the focused item
+    /// would open, or the view's own.
+    pub(crate) fn open_focused_menu(&self) {
+        let item = self.imp_().focus_item.borrow().clone();
+        let (target, (x, y)) = match item {
+            Some(item) => (self.target_of(&item), self.item_point(&item)),
+            None => (
+                None,
+                (
+                    f64::from(self.width()) / 2.0,
+                    f64::from(self.height()) / 2.0,
+                ),
+            ),
+        };
+        self.open_menu(target, x, y);
+    }
+
+    /// Where a menu for `item` opens: under its first box.
+    fn item_point(&self, item: &FocusItem) -> (f64, f64) {
+        match self.item_boxes(item).first() {
+            Some(r) => (f64::from(r.x()), f64::from(r.y() + r.height())),
+            None => (f64::from(PAD_X), f64::from(PAD_Y)),
+        }
+    }
+
+    /// The widget-space boxes `item` covers: one per line it is drawn on,
+    /// and the avatar alongside a speaker's name.
+    pub(crate) fn item_boxes(&self, item: &FocusItem) -> Vec<gtk4::graphene::Rect> {
+        let imp = self.imp_();
+        let height = content_height(self.height());
+        let m = imp.measure.borrow();
+        let mut buf = imp.buffer.borrow_mut();
+        let Some(row) = buf.row_of(item.message()) else {
+            return Vec::new();
+        };
+        buf.ensure_layout(row, &*m);
+        let scroll = buf.scroll_offset(height);
+        let top = buf.index_mut().offset_of(row) as f32 - scroll as f32 + PAD_Y as f32;
+        let (Some(layout), Some(msg)) = (buf.layout_at(row), buf.message_at(row)) else {
+            return Vec::new();
+        };
+        let rect = |x: u32, y: u32, w: u32, h: u32| {
+            gtk4::graphene::Rect::new(PAD_X as f32 + x as f32, top + y as f32, w as f32, h as f32)
+        };
+        let width = |source, range| styled_width(&m, msg, source, range);
+        let mut out = Vec::new();
+        match item {
+            FocusItem::Speaker { .. } => {
+                if let Some(av) = layout.avatar {
+                    out.push(rect(av.x, av.y, av.size, av.size));
+                }
+                for l in layout
+                    .lines
+                    .iter()
+                    .filter(|l| l.source == LineSource::Gutter)
+                {
+                    out.push(rect(l.x, l.y, width(l.source, l.range.clone()), l.height));
+                }
+            }
+            FocusItem::Link { source, range, .. } => {
+                for l in layout.lines.iter().filter(|l| l.source == *source) {
+                    let (a, b) = (range.start.max(l.range.start), range.end.min(l.range.end));
+                    if a < b {
+                        let x = l.x + width(l.source, l.range.start..a);
+                        out.push(rect(x, l.y, width(l.source, a..b), l.height));
+                    }
+                }
+            }
+            FocusItem::LoadMore { .. } => {
+                out.push(rect(0, 0, content_width(self.width()), layout.height));
+            }
+            FocusItem::Image { block, .. } => {
+                let source = LineSource::Block(*block);
+                for l in layout.lines.iter().filter(|l| l.source == source) {
+                    let w = match msg.blocks.get(*block) {
+                        Some(rotulus_layout::Block::Image { size: Some(sz), .. }) => {
+                            let avail = content_width(self.width()).saturating_sub(l.x);
+                            m.image_size((sz.width, sz.height), avail).0
+                        }
+                        _ => width(source, l.range.clone()),
+                    };
+                    out.push(rect(l.x, l.y, w, l.height));
+                }
+            }
+        }
+        out
+    }
+
+    /// The focus ring: around the focused item, or the whole view when
+    /// focus is on the view itself. Only once the keyboard has been used,
+    /// as GTK draws its own.
+    fn snapshot_focus(&self, snapshot: &gtk4::Snapshot) {
+        if !self.has_visible_focus() {
+            return;
+        }
+        let item = self.imp_().focus_item.borrow().clone();
+        let boxes = match item {
+            Some(item) => self.item_boxes(&item),
+            None => vec![gtk4::graphene::Rect::new(
+                2.0,
+                2.0,
+                (self.width() - 4).max(0) as f32,
+                (self.height() - 4).max(0) as f32,
+            )],
+        };
+        let accent = self.pal(PAL_MARK_BG);
+        let accent = gtk4::gdk::RGBA::new(accent.red(), accent.green(), accent.blue(), 1.0);
+        let ring = self.legibility().ink(accent, None);
+        for r in boxes {
+            let r = gtk4::graphene::Rect::new(
+                r.x() - 2.0,
+                r.y() - 1.0,
+                r.width() + 4.0,
+                r.height() + 2.0,
+            );
+            let rounded = gtk4::gsk::RoundedRect::from_rect(r, 3.0);
+            snapshot.append_border(&rounded, &[2.0; 4], &[ring; 4]);
+        }
+    }
 }
 
 // ---- inline media -----------------------------------------------------

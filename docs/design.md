@@ -604,11 +604,10 @@ GtkHx's other find bars, so one application doesn't highlight two ways.
 
 ### Keyboard paging, and why a global shortcut cannot do it
 
-A chat application usually makes the view unfocusable
-(`gtk_widget_set_can_focus (view, FALSE)`) so the message input keeps
-focus. The input is typically a `GtkTextView`, which binds PgUp/PgDn to
-its own cursor movement and swallows the key. That is why PgUp/PgDn never
-worked over xtext in GtkHx.
+Focus usually sits in the message input, not the view. The input is
+typically a `GtkTextView`, which binds PgUp/PgDn to its own cursor
+movement and swallows the key. That is why PgUp/PgDn never worked over
+xtext in GtkHx.
 
 A global-scope `GtkShortcut` would not help: global shortcuts run *after*
 normal propagation, so the TextView still wins. The binding therefore
@@ -626,6 +625,39 @@ following the tail. A view that is not mapped (a background tab, a closed
 private chat) must not eat the window's keys, so the handler checks that
 first. A page scroll keeps one line of overlap, so the line being read
 survives the jump. The same keys scroll when the view itself has focus.
+
+### Keyboard focus
+
+The view is focusable, and Tab is how someone without a pointer reaches
+what a click reaches. Its stops are the view as a whole, where the
+scrolling keys work and a screen reader reads the log, and then each
+thing on screen a click does something to — a speaker's name or avatar,
+a link, a load-more row, an image — in reading order. Tab from outside
+lands on the view, and Shift+Tab from outside on the last item on
+screen. Past the last item on screen, or back past the view, focus moves
+on to the neighboring widget, so it never traps the keyboard or walks a
+long scrollback item by item; scroll, and the next Tab starts from what
+is on screen.
+`rotulus-layout` decides the items and their order (`FocusItem`,
+`ChatBuffer::step_focus`), tested headless.
+
+The focused item gets a ring, drawn once the keyboard has been used, as
+GTK draws its own; focus on the view as a whole rings the view. Enter
+or Space does exactly what a primary click on the item does, signals
+and all, and Menu or Shift+F10 opens what a secondary click opens — for
+the item, or the view's own menu — and the view keeps the key. The
+menus' rows are focusable, so a menu opened from the keyboard is usable
+from it, and closing it (Escape, or choosing a row) puts focus back on
+the view and its item. Ctrl+A selects
+everything, Ctrl+C copies, and Escape drops the item focus and the
+selection. With GTK 4.14 the accessible caret moves to the focused item
+and the view announces its text and what it is ("link", "user").
+
+**An application that takes the view out of the focus chain**
+(`gtk_widget_set_can_focus (view, FALSE)`, to keep focus in the input)
+takes all of that away from keyboard users. The paging keys and
+Ctrl+C keep working over the input either way, from the root's capture
+phase, so there is no longer a reason to.
 
 ### Zoom
 
