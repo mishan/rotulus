@@ -181,8 +181,9 @@ impl Mark {
     }
 }
 
-/// Search highlight colors: Adwaita yellow-4 `#f6d32d` on black for every
-/// hit, orange `#ff7800` on white for the active one. An application can
+/// Search highlight colors: Adwaita yellow-4 `#f6d32d` for every hit,
+/// orange `#ff7800` for the active one, both with black text — white on
+/// that orange is well short of legible. An application can
 /// use the same pair in its other find bars, so that two in one app don't
 /// highlight differently.
 ///
@@ -192,7 +193,7 @@ impl Mark {
 const SEARCH_MATCH_BG: gtk4::gdk::RGBA = gtk4::gdk::RGBA::new(0.9647, 0.8275, 0.1765, 1.0);
 const SEARCH_MATCH_FG: gtk4::gdk::RGBA = gtk4::gdk::RGBA::new(0.0, 0.0, 0.0, 1.0);
 const SEARCH_CURRENT_BG: gtk4::gdk::RGBA = gtk4::gdk::RGBA::new(1.0, 0.4706, 0.0, 1.0);
-const SEARCH_CURRENT_FG: gtk4::gdk::RGBA = gtk4::gdk::RGBA::new(1.0, 1.0, 1.0, 1.0);
+const SEARCH_CURRENT_FG: gtk4::gdk::RGBA = gtk4::gdk::RGBA::new(0.0, 0.0, 0.0, 1.0);
 
 /// How long the zoom badge stays fully opaque, then how long it fades.
 const ZOOM_BADGE_HOLD_US: i64 = 700_000;
@@ -381,6 +382,9 @@ pub(crate) mod imp {
         /// asks for it and kept in step with appends from then on.
         #[cfg(feature = "v4_14")]
         pub(crate) a11y: RefCell<Option<crate::a11y::TextModel>>,
+        /// The desktop settings this view follows, and its handlers on
+        /// them, to disconnect when the view goes.
+        pub settings_handlers: RefCell<Option<(gtk4::Settings, Vec<glib::SignalHandlerId>)>>,
     }
 
     impl Default for RotulusView {
@@ -424,6 +428,7 @@ pub(crate) mod imp {
                 marker: Cell::new(None),
                 #[cfg(feature = "v4_14")]
                 a11y: RefCell::new(None),
+                settings_handlers: RefCell::new(None),
             }
         }
     }
@@ -540,6 +545,15 @@ pub(crate) mod imp {
             obj.install_selection_gestures();
             obj.install_zoom_bindings();
             obj.install_link_handlers();
+            obj.watch_settings();
+        }
+
+        fn dispose(&self) {
+            if let Some((settings, ids)) = self.settings_handlers.borrow_mut().take() {
+                for id in ids {
+                    settings.disconnect(id);
+                }
+            }
         }
 
         fn properties() -> &'static [glib::ParamSpec] {
@@ -978,10 +992,30 @@ impl RotulusView {
     /// second.
     fn flash_zoom_badge(&self) {
         let imp = self.imp_();
-        imp.zoom_badge_until
-            .set(glib::monotonic_time() + ZOOM_BADGE_HOLD_US + ZOOM_BADGE_FADE_US);
+        let shown_us = ZOOM_BADGE_HOLD_US + ZOOM_BADGE_FADE_US;
+        imp.zoom_badge_until.set(glib::monotonic_time() + shown_us);
         self.queue_draw();
 
+        // With animations off the badge doesn't fade, so nothing needs a
+        // frame until it goes.
+        if !self.animations_enabled() {
+            let this = self.downgrade();
+            glib::timeout_add_local_once(
+                std::time::Duration::from_micros(shown_us as u64),
+                move || {
+                    let Some(this) = this.upgrade() else {
+                        return;
+                    };
+                    // A later flash moved the deadline; its own timeout
+                    // takes the badge down.
+                    if glib::monotonic_time() >= this.imp_().zoom_badge_until.get() {
+                        this.imp_().zoom_badge_until.set(0);
+                        this.queue_draw();
+                    }
+                },
+            );
+            return;
+        }
         if imp.zoom_badge_tick.borrow().is_some() {
             return; // already animating; the new deadline extends it
         }
@@ -1016,7 +1050,11 @@ impl RotulusView {
             return;
         }
         // Full opacity while held, then a linear fade.
-        let alpha = (remaining as f64 / ZOOM_BADGE_FADE_US as f64).clamp(0.0, 1.0) as f32;
+        let alpha = if self.animations_enabled() {
+            (remaining as f64 / ZOOM_BADGE_FADE_US as f64).clamp(0.0, 1.0) as f32
+        } else {
+            1.0
+        };
 
         let pct = (self.zoom_permille() + 5) / 10;
         let layout = self.create_pango_layout(Some(&format!("{pct}%")));
@@ -1062,6 +1100,79 @@ impl RotulusView {
 
     pub fn zoom_permille(&self) -> u32 {
         self.imp_().measure.borrow().zoom_permille()
+    }
+
+    /// Follow the desktop settings that change how the view draws.
+    fn watch_settings(&self) {
+        let Some(settings) = gtk4::Settings::default() else {
+            return;
+        };
+        let mut ids = Vec::new();
+        // gtk-interface-contrast is GTK 4.20's; looked up by name, so a
+        // build against an older GTK still follows it when run on a newer.
+        for name in [
+            "gtk-enable-animations",
+            "gtk-theme-name",
+            "gtk-interface-contrast",
+        ] {
+            if settings.find_property(name).is_none() {
+                continue;
+            }
+            let this = self.downgrade();
+            ids.push(settings.connect_notify_local(Some(name), move |_, _| {
+                if let Some(this) = this.upgrade() {
+                    this.sync_animation_tick();
+                    this.queue_draw();
+                }
+            }));
+        }
+        *self.imp_().settings_handlers.borrow_mut() = Some((settings, ids));
+    }
+
+    /// Whether the desktop allows animation. Off, images hold their first
+    /// frame and the zoom badge doesn't fade.
+    fn animations_enabled(&self) -> bool {
+        gtk4::Settings::default().is_none_or(|s| s.is_gtk_enable_animations())
+    }
+
+    /// The contrast text has to reach: more when the desktop asks for
+    /// more, through GTK 4.20's setting or, before it, a high-contrast
+    /// theme.
+    fn min_contrast(&self) -> f32 {
+        let Some(settings) = gtk4::Settings::default() else {
+            return crate::contrast::MIN_RATIO;
+        };
+        let asked = settings
+            .find_property("gtk-interface-contrast")
+            .is_some_and(|_| {
+                let v = settings.property_value("gtk-interface-contrast");
+                glib::EnumValue::from_value(&v).is_some_and(|(_, e)| e.nick() == "more")
+            });
+        let theme = settings
+            .gtk_theme_name()
+            .is_some_and(|n| n.to_ascii_lowercase().contains("highcontrast"));
+        if asked || theme {
+            crate::contrast::HIGH_RATIO
+        } else {
+            crate::contrast::MIN_RATIO
+        }
+    }
+
+    /// What text is drawn against this frame, and how legible it must be.
+    fn legibility(&self) -> Legibility {
+        // A background left to the system can't be read back from CSS.
+        // Adwaita's own view background stands in for it, chosen by
+        // whether the system's text color is light or dark.
+        let text = self.color();
+        let guess = if crate::contrast::luminance(rgb_of(&text)) > 0.5 {
+            ADWAITA_DARK_BG
+        } else {
+            ADWAITA_LIGHT_BG
+        };
+        Legibility {
+            bg: over(&self.pal(PAL_BG), guess),
+            min: self.min_contrast(),
+        }
     }
 
     /// Toggle the timestamp column.
@@ -1563,7 +1674,8 @@ impl RotulusView {
         let selection = *imp.selection.borrow();
         let show_stamp = imp.time_stamp.get();
         let stamp_format = imp.stamp_format.borrow().clone();
-        let stamp_color = self.pal(PAL_TIMESTAMP);
+        let legibility = self.legibility();
+        let stamp_color = legibility.ink(self.pal(PAL_TIMESTAMP), None);
 
         for (row, row_top) in placed {
             let Some(layout) = buf.layout_at(row) else {
@@ -1798,6 +1910,7 @@ impl RotulusView {
                     hl,
                     &hits,
                     hover,
+                    legibility,
                     x,
                     y as f32,
                 );
@@ -1851,6 +1964,7 @@ impl RotulusView {
         hl: Option<(usize, usize)>,
         search: &[(usize, usize, bool)],
         hover: Option<(usize, usize)>,
+        legibility: Legibility,
         x0: f32,
         y: f32,
     ) {
@@ -1970,7 +2084,7 @@ impl RotulusView {
                 if style.attrs.contains(rotulus_layout::Attrs::REVERSE) {
                     let ink = match bg.filter(|b| b.alpha() > 0.0) {
                         Some(b) => b,
-                        None => contrast(&fg),
+                        None => black_or_white(&fg),
                     };
                     (ink, Some(fg))
                 } else {
@@ -1992,6 +2106,7 @@ impl RotulusView {
                 Mark::Match => SEARCH_MATCH_FG,
                 Mark::None => run_fg,
             };
+            let fg = legibility.ink(fg, band_bg.as_ref().or(run_bg.as_ref()));
             snapshot.save();
             snapshot.translate(&gtk4::graphene::Point::new(*x, y));
             snapshot.append_layout(layout, &fg);
@@ -2066,12 +2181,50 @@ impl RotulusView {
 }
 
 /// Black or white, whichever reads against `c`.
-fn contrast(c: &gtk4::gdk::RGBA) -> gtk4::gdk::RGBA {
+fn black_or_white(c: &gtk4::gdk::RGBA) -> gtk4::gdk::RGBA {
     let light = 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue() > 0.5;
     if light {
         gtk4::gdk::RGBA::BLACK
     } else {
         gtk4::gdk::RGBA::WHITE
+    }
+}
+
+/// Adwaita's `view_bg_color`, light and dark.
+const ADWAITA_LIGHT_BG: crate::contrast::Rgb = [1.0, 1.0, 1.0];
+const ADWAITA_DARK_BG: crate::contrast::Rgb = [0.118, 0.118, 0.118];
+
+fn rgb_of(c: &gtk4::gdk::RGBA) -> crate::contrast::Rgb {
+    [c.red(), c.green(), c.blue()]
+}
+
+/// `top` composited over the opaque `under`.
+fn over(top: &gtk4::gdk::RGBA, under: crate::contrast::Rgb) -> crate::contrast::Rgb {
+    let a = top.alpha();
+    let t = rgb_of(top);
+    [0, 1, 2].map(|i| t[i] * a + under[i] * (1.0 - a))
+}
+
+/// The background a frame draws on, and the contrast its text must reach
+/// against it. See `crate::contrast`.
+#[derive(Debug, Clone, Copy)]
+struct Legibility {
+    bg: crate::contrast::Rgb,
+    min: f32,
+}
+
+impl Legibility {
+    /// `fg` as it should be drawn over `under` (or the view's own
+    /// background): itself when legible, otherwise nudged until it is.
+    fn ink(&self, fg: gtk4::gdk::RGBA, under: Option<&gtk4::gdk::RGBA>) -> gtk4::gdk::RGBA {
+        let bg = under.map_or(self.bg, |u| over(u, self.bg));
+        let seen = over(&fg, bg);
+        let out = crate::contrast::ensure(seen, bg, self.min);
+        if out == seen {
+            fg
+        } else {
+            gtk4::gdk::RGBA::new(out[0], out[1], out[2], 1.0)
+        }
     }
 }
 
@@ -2105,6 +2258,9 @@ pub fn default_palette() -> [gtk4::gdk::RGBA; PALETTE_COLS] {
     for (dst, v) in p.iter_mut().zip(MIRC) {
         *dst = rgb(v);
     }
+    // No one gray reaches 4.5:1 on both a light and a dark background;
+    // this one sits between, and the draw-time contrast check takes it
+    // the rest of the way on either. See `crate::contrast`.
     let gray = gtk4::gdk::RGBA::new(0.5, 0.5, 0.5, 1.0);
     p[PAL_MARK_BG] = gtk4::gdk::RGBA::new(0.208, 0.518, 0.894, 0.35);
     p[PAL_MARKER] = rgb(0xe01b24);
@@ -3397,9 +3553,23 @@ impl RotulusView {
     /// of view used to advance, and repaint the view, at its own frame
     /// rate for as long as it stayed in the scrollback; now it holds its
     /// frame, and the next snapshot that draws it starts the tick again.
+    ///
+    /// With the desktop's animations off, nothing advances and every
+    /// animation shows its first frame.
     fn sync_animation_tick(&self) {
         let imp = self.imp_();
-        let animated = self.animating_on_screen();
+        if !self.animations_enabled() {
+            let mut rewound = false;
+            for entry in imp.media.borrow_mut().values_mut() {
+                rewound |= entry.current != 0;
+                entry.current = 0;
+                entry.since_us = 0;
+            }
+            if rewound {
+                self.queue_draw();
+            }
+        }
+        let animated = self.animations_enabled() && self.animating_on_screen();
         let running = imp.anim_tick.borrow().is_some();
         if animated == running {
             return;

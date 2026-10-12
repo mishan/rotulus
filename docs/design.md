@@ -195,6 +195,23 @@ view starts that way for every role except the selection, muted and
 timestamp text, the marker and the per-nick colors, which need a color
 of their own to be visible at all.
 
+Whatever the colors, text stays legible. The palette, the runs and the
+theme are chosen by three parties who never see each other's choices —
+mIRC white lands on a light theme, yellow on white, a nick hue picked for
+dark on light — so every foreground is checked at draw time against the
+background it lands on, and one short of WCAG's 4.5:1 is moved toward
+black or white by just enough to reach it, keeping its hue where it can.
+A background left to the system can't be read back from CSS, so Adwaita's
+view background, light or dark by the system text color, stands in for
+it. When the desktop asks for more contrast (GTK 4.20's
+`gtk-interface-contrast`, looked up at run time, or a theme named
+HighContrast before it) the target is 7:1. An application with its own
+high-contrast palette passes it as usual; the check only ever moves a
+color that falls short. An application that recolors the view's background
+through CSS (`@view_bg_color`, say) has to pass that color as the
+palette's background too (`ROTULUS_PAL_BG`), or the check measures
+against Adwaita's stand-in instead of what is really there.
+
 `rotulus.h` is the sole definition of that contract. Nothing at the FFI
 boundary checks the palette's length — `ffi.rs` reads `PALETTE_COLS`
 entries from the C array — so a rotulus test reads the defines out of
@@ -580,7 +597,7 @@ both step, because which pair is muscle memory depends on where someone
 came from.
 
 Matches are drawn in fixed colors — Adwaita yellow `#f6d32d` on black
-for every hit, orange `#ff7800` on white for the current one — rather
+for every hit, orange `#ff7800` on black for the current one — rather
 than palette roles, so a find bar doesn't widen the palette contract in
 `rotulus.h` that every application theme has to answer. They match
 GtkHx's other find bars, so one application doesn't highlight two ways.
@@ -625,7 +642,8 @@ text scaling factor.
 
 Zoom is otherwise silent: text changes size and nothing says by how much
 or how to get back to 100%. A badge showing the percentage holds for
-around a second and then fades, drawn inside the widget's own snapshot
+around a second and then fades (or, with the desktop's animations off,
+just goes), drawn inside the widget's own snapshot
 rather than as an overlay widget — an application may pack the view as a
 bare child beside a `GtkScrollbar`, as GtkHx does, and a `GtkOverlay`
 would mean restructuring every container that holds one for a label that
@@ -781,7 +799,8 @@ reference: a binding's wrapper for a paintable it just made may be gone
 by the time the call returns, so a borrowed one would be freed under the
 view. The function must
 not change the view. `avatar-size` sets the edge in pixels, and 0 hides
-avatars.
+avatars. An avatar's animation is the application's, so honoring
+`gtk-enable-animations` for it is the application's too.
 
 ### Inline media
 
@@ -793,7 +812,8 @@ since the row may be trimmed while the decode runs.
 `rotulus_view_media_set_texture` supplies a still image and
 `rotulus_view_media_set_frames` an animation; either reverts the row to
 its alt text when given nothing. An animation only advances while it is
-on screen.
+on screen, and not at all while the desktop's `gtk-enable-animations` is
+off: it shows its first frame until the setting comes back on.
 
 ### One column
 

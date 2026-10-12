@@ -1120,6 +1120,27 @@ fn check_offscreen_animation_stops() {
     );
     frame();
     assert!(ticking(), "the next paint should start it again");
+
+    // The desktop's animations turned off: the tick stops at once and the
+    // image goes back to its first frame, and stays there.
+    let settings = gtk4::Settings::default().expect("GTK is initialized");
+    view.imp_ref()
+        .media
+        .borrow_mut()
+        .get_mut(&TOKEN)
+        .unwrap()
+        .current = 1;
+    settings.set_gtk_enable_animations(false);
+    assert!(!ticking(), "animations off should stop the tick");
+    assert_eq!(view.imp_ref().media.borrow()[&TOKEN].current, 0);
+    frame();
+    assert!(
+        !ticking(),
+        "a paint must not restart it with animations off"
+    );
+    settings.set_gtk_enable_animations(true);
+    frame();
+    assert!(ticking(), "animations back on, the next paint starts it");
 }
 
 // ---- run-based append ------------------------------------------------

@@ -14,6 +14,7 @@
 //! doesn't gets English.
 
 mod a11y;
+mod contrast;
 pub mod ffi;
 pub mod links;
 pub mod measure;
