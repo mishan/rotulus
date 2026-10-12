@@ -26,6 +26,9 @@ mirc = ["dep:rotulus-mirc"]
 # interface arrived in GTK 4.14; without the feature the view builds
 # against 4.10 and exposes only its role.
 v4_14 = ["gtk4/v4_14"]
+# GtkAccessibleText's extents and offset, so a screen reader can find
+# text on screen and magnifiers can follow it. GTK 4.16.
+v4_16 = ["v4_14", "gtk4/v4_16"]
 # For the C shared library that Meson builds, and nothing else. Its caller
 # initializes GTK, as any C program does, so gtk4-rs's check that Rust did
 # is switched off. The introspection scanner needs that too: it builds the

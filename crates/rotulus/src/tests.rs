@@ -745,6 +745,73 @@ fn gtk_class_and_construction_smoke() {
     check_offscreen_animation_stops();
     check_typed_signals();
     check_replace_and_marker();
+    check_text_scale_remeasures();
+    #[cfg(feature = "v4_14")]
+    check_accessible_caret();
+}
+
+/// A change to the desktop's text scale throws away every measurement.
+fn check_text_scale_remeasures() {
+    let view = crate::view::RotulusView::new();
+    let settings = gtk4::Settings::default().expect("GTK is initialized");
+    let before = view.imp_ref().font_generation.get();
+    let dpi = settings.gtk_xft_dpi();
+    settings.set_gtk_xft_dpi(if dpi == 96 * 1024 {
+        120 * 1024
+    } else {
+        96 * 1024
+    });
+    let ctx = gtk4::glib::MainContext::default();
+    while ctx.iteration(false) {}
+    settings.set_gtk_xft_dpi(dpi);
+    while ctx.iteration(false) {}
+    assert_ne!(
+        view.imp_ref().font_generation.get(),
+        before,
+        "the measurements should have been invalidated"
+    );
+}
+
+/// The accessible caret: at the newest row until something moves it, and
+/// on the current match when a search reveals one.
+#[cfg(feature = "v4_14")]
+fn check_accessible_caret() {
+    use gtk4::subclass::prelude::AccessibleTextImpl;
+
+    let view = crate::view::RotulusView::new();
+    view.append(message_row(1, "al", "one"));
+    view.append(message_row(2, "bo", "two"));
+    let _holder = laid_out(&view);
+    let imp = view.imp_ref();
+    // "al: one\nbo: two"
+    assert_eq!(
+        imp.caret_position(),
+        8,
+        "the caret starts on the newest row"
+    );
+    view.search_set("one", false);
+    assert_eq!(imp.caret_position(), 7, "a revealed match moves it");
+    let sel = imp.selection();
+    assert_eq!(sel.len(), 1);
+    assert_eq!((sel[0].start(), sel[0].length()), (4, 3), "and selects it");
+    view.search_clear();
+    assert_eq!(imp.caret_position(), 8, "clearing the search puts it back");
+    assert!(imp.selection().is_empty());
+    view.search_set("one", false);
+
+    #[cfg(feature = "v4_16")]
+    {
+        let r = imp.extents(4, 7).expect("an on-screen range has extents");
+        assert!(r.width() > 0.0 && r.height() > 0.0);
+        for (dx, want) in [(1.0, 4), (r.width() - 3.0, 6)] {
+            let p = gtk4::graphene::Point::new(r.x() + dx, r.y() + r.height() / 2.0);
+            assert_eq!(
+                imp.offset(&p),
+                Some(want),
+                "a point maps to the character under it"
+            );
+        }
+    }
 }
 
 /// A row of runs, the way an application appends one.
@@ -1029,13 +1096,13 @@ fn check_replace_and_marker() {
         let text = view
             .with_a11y(|m, _| Some(m.contents(0, u32::MAX).to_string()))
             .expect("the accessible text builds");
-        assert_eq!(text, "<bo> reply");
+        assert_eq!(text, "bo: reply");
         view.append(message_row(3, "cy", "new"));
         let text = view
             .with_a11y(|m, _| Some(m.contents(0, u32::MAX).to_string()))
             .unwrap();
         assert_eq!(
-            text, "<bo> reply\n<cy> new",
+            text, "bo: reply\ncy: new",
             "an append extends the accessible text"
         );
     }

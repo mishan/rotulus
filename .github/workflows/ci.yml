@@ -56,6 +56,7 @@ jobs:
         run: |
           cargo clippy --workspace --all-targets -- -D warnings
           cargo clippy --workspace --all-targets --features rotulus/v4_14 -- -D warnings
+          cargo clippy --workspace --all-targets --features rotulus/v4_16 -- -D warnings
           cargo clippy --workspace --all-targets --no-default-features -- -D warnings
           cargo clippy --workspace --all-targets --features rotulus/capi -- -D warnings
 
@@ -63,7 +64,7 @@ jobs:
       # and session bus, so the accessibility bus has somewhere to live.
       - name: test
         run: |
-          for features in "" "--features rotulus/v4_14" "--no-default-features"; do
+          for features in "" "--features rotulus/v4_14" "--features rotulus/v4_16" "--no-default-features"; do
             dbus-run-session -- xvfb-run -a cargo test --workspace $features
           done
 

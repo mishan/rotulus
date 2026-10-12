@@ -27,6 +27,10 @@ features = ['capi']
 if gtk.version().version_compare('>= 4.14')
   features += 'v4_14'
 endif
+# Where the text is on screen, for magnifiers.
+if gtk.version().version_compare('>= 4.16')
+  features += 'v4_16'
+endif
 release = get_option('optimization') not in ['0', 'g']
 
 cargo_args = [

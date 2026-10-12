@@ -625,7 +625,7 @@ focus check. Ctrl+Home/End jump to the top of the scrollback and back to
 following the tail. A view that is not mapped (a background tab, a closed
 private chat) must not eat the window's keys, so the handler checks that
 first. A page scroll keeps one line of overlap, so the line being read
-survives the jump.
+survives the jump. The same keys scroll when the view itself has focus.
 
 ### Zoom
 
@@ -638,7 +638,8 @@ scale together, so the layout stays proportionate. It is stored in
 per-mille and steps through a fixed ladder from 50% to 400%, the one
 browsers and terminals have taught people. Bindings are `Ctrl` + `+` /
 `-` / `0` and `Ctrl` + scroll wheel. It is distinct from the desktop-wide
-text scaling factor.
+text scaling factor, which the view follows too: a change to it
+(`gtk-xft-dpi`) remeasures everything, as a font change does.
 
 Zoom is otherwise silent: text changes size and nothing says by how much
 or how to get back to 100%. A badge showing the percentage holds for
@@ -847,12 +848,35 @@ one), it implements `GtkAccessibleText`: a screen reader reads the
 transcript as one text, a row per line, as timestamp, nick and message. A
 grouped row still names its speaker there, because "who said this" is the
 first thing a listener needs and the visual cue that stands in for it
-isn't available to them. The text is built the first time an assistive
+isn't available to them. The speaker is read by name, not as the gutter
+draws it, since `<al>` is spoken as "less than al greater than"; a row
+with no speaker reads its gutter. A link whose label isn't its address
+reads as both, `label (address)`, because a listener can't hover it to
+see where it goes. GTK 4 has no hypertext interface for marking links in
+an accessible text, so that is the only way an address gets across.
+
+Words, lines and rows are reported the way GTK's own text widgets report
+them, each running to where the next starts, so a reader stepping through
+them by asking at the end of the last one never stalls on a separator.
+The caret is the selection's end when there is a selection, the current
+match once a search reveals one (selected, for the reader, but not
+painted as a selection), and otherwise the start of the newest row, since
+the end of a log is what is being read. A change of zoom is announced as
+its percentage. With GTK 4.16 (the `v4_16` feature) the view also reports
+where on screen a range of the text is, and which character is under a
+point, so a magnifier can follow it. The text is built the first time an assistive
 technology asks and kept in step from then on, row by row: an append, a
 page of history, a removal, a replace and the trim at the scrollback cap
 each report only the rows they touched. Only what changes every row at
 once — a clear, a new timestamp format — is reported as the whole text
-going and coming back. Below 4.14 the view exposes its role only.
+going and coming back.
+
+Below 4.14 the view exposes its role only: a screen reader can't read the
+transcript at all, and an application built for an older GTK has to
+announce new messages itself (with its own live region, or a
+notification) if anyone using one is to hear them. At any version the
+view doesn't announce new messages on its own; see "Announcing new
+messages" below.
 
 ### IRC formatting
 
