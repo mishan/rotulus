@@ -382,6 +382,10 @@ pub(crate) mod imp {
         /// asks for it and kept in step with appends from then on.
         #[cfg(feature = "v4_14")]
         pub(crate) a11y: RefCell<Option<crate::a11y::TextModel>>,
+        /// Where something other than a selection last put the accessible
+        /// caret: the current search match.
+        #[cfg(feature = "v4_14")]
+        pub(crate) a11y_caret: Cell<Option<Selection>>,
         /// The desktop settings this view follows, and its handlers on
         /// them, to disconnect when the view goes.
         pub settings_handlers: RefCell<Option<(gtk4::Settings, Vec<glib::SignalHandlerId>)>>,
@@ -428,6 +432,8 @@ pub(crate) mod imp {
                 marker: Cell::new(None),
                 #[cfg(feature = "v4_14")]
                 a11y: RefCell::new(None),
+                #[cfg(feature = "v4_14")]
+                a11y_caret: Cell::new(None),
                 settings_handlers: RefCell::new(None),
             }
         }
@@ -720,6 +726,8 @@ pub(crate) mod imp {
                     } else {
                         rotulus_layout::Linkifier::new(schemes)
                     };
+                    // Which links read out their address depends on it.
+                    obj.a11y_reset();
                 }
                 "autocopy" => self.autocopy.set(value.get().unwrap_or(true)),
                 "copy-timestamps" => self.copy_timestamps.set(value.get().unwrap_or(false)),
@@ -862,16 +870,22 @@ impl RotulusView {
         self.imp_()
     }
 
-    /// How the accessible text formats a row's timestamp: as drawn, or
-    /// not at all when the column is hidden.
+    /// How the accessible text reads a row: its timestamp as drawn, or
+    /// none when the column is hidden, and its links as this view
+    /// detects them.
     #[cfg_attr(not(feature = "v4_14"), allow(dead_code))]
-    pub(crate) fn a11y_stamp_fn(&self) -> Box<dyn Fn(i64) -> Option<String>> {
+    pub(crate) fn a11y_format(&self) -> crate::a11y::RowFormat {
         let imp = self.imp_();
-        if !imp.time_stamp.get() {
-            return Box::new(|_| None);
+        let stamp: Box<dyn Fn(i64) -> Option<String>> = if imp.time_stamp.get() {
+            let fmt = imp.stamp_format.borrow().clone();
+            Box::new(move |t| format_stamp(t, &fmt))
+        } else {
+            Box::new(|_| None)
+        };
+        crate::a11y::RowFormat {
+            stamp,
+            linkifier: imp.linkifier.borrow().clone(),
         }
-        let fmt = imp.stamp_format.borrow().clone();
-        Box::new(move |t| format_stamp(t, &fmt))
     }
 
     // ---- configuration ------------------------------------------------
@@ -978,6 +992,7 @@ impl RotulusView {
         self.queue_resize();
         if zoom != was {
             self.flash_zoom_badge();
+            self.a11y_announce(&format!("{}%", (self.zoom_permille() + 5) / 10));
         }
     }
 
@@ -1126,6 +1141,22 @@ impl RotulusView {
                 }
             }));
         }
+        // The desktop's text scale. Every measurement taken at the old
+        // resolution is wrong at the new one. Remeasured from an idle,
+        // after GTK has given the widget's Pango context the new
+        // resolution, which it may do after this handler runs.
+        let this = self.downgrade();
+        ids.push(
+            settings.connect_notify_local(Some("gtk-xft-dpi"), move |_, _| {
+                let this = this.clone();
+                glib::idle_add_local_once(move || {
+                    if let Some(this) = this.upgrade() {
+                        let font = this.imp_().font.borrow().clone();
+                        this.apply_font(&font);
+                    }
+                });
+            }),
+        );
         *self.imp_().settings_handlers.borrow_mut() = Some((settings, ids));
     }
 
@@ -2168,6 +2199,41 @@ impl RotulusView {
     }
 }
 
+/// Width of `range` of one of a row's texts, measured a run at a time in
+/// the styles it is drawn in, so a box drawn around bold text fits it.
+#[cfg_attr(not(feature = "v4_16"), allow(dead_code))]
+fn styled_width(
+    m: &PangoMeasure,
+    msg: &Message,
+    source: LineSource,
+    range: std::ops::Range<usize>,
+) -> u32 {
+    let (text, spans): (&str, &[Span]) = match source {
+        LineSource::Gutter => match &msg.gutter {
+            Some(g) => (&g.text, &g.spans),
+            None => return 0,
+        },
+        LineSource::Block(bi) => match msg.blocks.get(bi) {
+            Some(rotulus_layout::Block::Text(p)) => (&p.text, &p.spans),
+            Some(rotulus_layout::Block::Quote { content, .. }) => (&content.text, &content.spans),
+            Some(rotulus_layout::Block::Code { text, .. }) => (text, &[]),
+            Some(rotulus_layout::Block::Image { alt, .. }) => (alt, &[]),
+            None => return 0,
+        },
+    };
+    let width = |r: std::ops::Range<usize>, style| text.get(r).map_or(0, |t| m.run_width(t, style));
+    let mut w = 0;
+    let mut at = range.start;
+    for s in spans {
+        let (a, b) = (s.range.start.max(at), s.range.end.min(range.end));
+        if a < b {
+            w += width(at..a, Style::default()) + width(a..b, s.style);
+            at = b;
+        }
+    }
+    w + width(at..range.end, Style::default())
+}
+
 /// Convenience for tests and the FFI: append a plain system message.
 pub fn plain_message(text: &str) -> Message {
     Message::system(ParsedText::plain(text))
@@ -2661,8 +2727,12 @@ impl RotulusView {
 
         // Shift+PgUp/PgDn is the long-standing IRC binding for "scroll
         // the log" and is unambiguous anywhere, so it bypasses the
-        // focus check. Unmodified paging only applies over an input.
-        if !(focus_is_text_entry(c) || shift && matches!(action, ScrollKey::Page(_))) {
+        // focus check. Unmodified paging only applies over an input, or
+        // over the view itself.
+        if !(focus_is_text_entry(c)
+            || self.has_focus()
+            || shift && matches!(action, ScrollKey::Page(_)))
+        {
             return false;
         }
 
@@ -2756,6 +2826,7 @@ impl RotulusView {
 
     pub fn search_clear(&self) {
         self.imp_().search.borrow_mut().clear();
+        self.a11y_move_caret(None);
         self.queue_draw();
     }
 
@@ -2774,12 +2845,18 @@ impl RotulusView {
             imp.buffer.borrow_mut().reveal(m.message, height, &*measure);
             drop(measure);
             self.sync_adjustment(height);
+            let at = |offset| Caret {
+                message: m.message,
+                source: m.source,
+                offset,
+            };
+            self.a11y_move_caret(Some(Selection::new(at(m.start), at(m.end))));
         }
         self.queue_draw();
     }
 
     /// Widget-space point → document position.
-    fn caret_at(&self, x: f64, y: f64) -> Option<Caret> {
+    pub(crate) fn caret_at(&self, x: f64, y: f64) -> Option<Caret> {
         let imp = self.imp_();
         let height = content_height(self.height());
         let scroll = {
@@ -2792,6 +2869,73 @@ impl RotulusView {
         let m = imp.measure.borrow();
         let mut buf = imp.buffer.borrow_mut();
         buf.hit_test(cx, cy, &*m)
+    }
+
+    /// The character under a widget-space point.
+    #[cfg(feature = "v4_16")]
+    pub(crate) fn char_at(&self, x: f64, y: f64) -> Option<Caret> {
+        let mut c = self.caret_at(x, y)?;
+        // The hit test answers with the boundary after the point, which
+        // is what a drag wants; the character holding the point is the
+        // one before it.
+        if c.offset > 0 && self.caret_rect(&c).is_some_and(|r| f64::from(r.x()) > x) {
+            let buf = self.imp_().buffer.borrow();
+            let text = buf.source_text(buf.row_of(c.message)?, c.source)?;
+            c.offset = text[..c.offset]
+                .char_indices()
+                .next_back()
+                .map_or(0, |(i, _)| i);
+        }
+        Some(c)
+    }
+
+    /// Widget-space box of the character at `caret`, laying its row out
+    /// if it hasn't been.
+    #[cfg(feature = "v4_16")]
+    pub(crate) fn caret_rect(&self, caret: &Caret) -> Option<gtk4::graphene::Rect> {
+        let imp = self.imp_();
+        let height = content_height(self.height());
+        let m = imp.measure.borrow();
+        let mut buf = imp.buffer.borrow_mut();
+        let row = buf.row_of(caret.message)?;
+        buf.ensure_layout(row, &*m);
+        let scroll = buf.scroll_offset(height);
+        let top = buf.index_mut().offset_of(row) as f32 - scroll as f32 + PAD_Y as f32;
+        let layout = buf.layout_at(row)?;
+        let mut lines = layout.lines.iter().filter(|l| l.source == caret.source);
+        // The line a character starts, or for the end of the text, the
+        // line it ends.
+        let line = lines
+            .clone()
+            .find(|l| l.range.contains(&caret.offset))
+            .or_else(|| lines.find(|l| l.range.end == caret.offset));
+        let Some(line) = line else {
+            // A gutter that isn't drawn, as on a grouped row: the row.
+            let w = content_width(self.width()) as f32;
+            return Some(gtk4::graphene::Rect::new(
+                PAD_X as f32,
+                top,
+                w,
+                layout.height as f32,
+            ));
+        };
+        let msg = buf.message_at(row)?;
+        let text = buf.source_text(row, caret.source).unwrap_or("");
+        let before = styled_width(&m, msg, caret.source, line.range.start..caret.offset);
+        let x = PAD_X as f32 + line.x as f32 + before as f32;
+        let w = match text.get(caret.offset..).and_then(|t| t.chars().next()) {
+            Some(c) => {
+                let end = caret.offset + c.len_utf8();
+                styled_width(&m, msg, caret.source, caret.offset..end)
+            }
+            None => m.metrics().space_width,
+        };
+        Some(gtk4::graphene::Rect::new(
+            x,
+            top + line.y as f32,
+            w as f32,
+            line.height as f32,
+        ))
     }
 
     /// The selected text, or empty.

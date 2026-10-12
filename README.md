@@ -173,7 +173,7 @@ Meson options:
   Python and GJS, and check that it exports nothing but its C API.
 
 It builds against GTK 4.14's accessibility interface when it finds GTK
-4.14 or newer.
+4.14 or newer, and adds 4.16's on-screen extents when it finds 4.16.
 
 The Rust crates build and test with cargo alone:
 
@@ -188,7 +188,10 @@ Cargo features on `rotulus`:
 - **`mirc`** (default): the C entry points to `rotulus-mirc`.
 - **`v4_14`**: implements GtkAccessibleText, so a screen reader can read
   the transcript. Needs GTK 4.14. Without it, the view builds against
-  GTK 4.10 and exposes only its accessible role.
+  GTK 4.10 and exposes only its accessible role, and an application has
+  to announce new messages itself for a screen reader to hear them.
+- **`v4_16`**: also reports where the text is on screen, for magnifiers
+  and screen readers that follow it. Needs GTK 4.16.
 - **`capi`**: for the shared library alone. It switches off gtk4-rs's
   check that Rust initialized GTK, which a C caller never does.
 
