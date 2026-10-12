@@ -38,7 +38,11 @@ Rotulus is not 1.0 yet, and its API may still change.
   - a last-read marker line
   - a single-column mode for logs
 
-  With no colors set, it follows the Adwaita theme.
+  With no colors set, it follows the Adwaita theme. Whatever the colors,
+  text is kept legible against what it is drawn on, and animations hold
+  still when the desktop turns them off. An application that recolors the
+  view's background in CSS passes the same color as the palette's
+  background, since the view can't read it back.
 - **The engine is tested without a display.** The layout crate has no
   dependencies, and its whole suite runs under plain `cargo test`.
 
