@@ -746,8 +746,136 @@ fn gtk_class_and_construction_smoke() {
     check_typed_signals();
     check_replace_and_marker();
     check_text_scale_remeasures();
+    check_keyboard_focus();
     #[cfg(feature = "v4_14")]
     check_accessible_caret();
+}
+
+/// Tab enters the view, steps through what can be activated in reading
+/// order, and leaves past the end; Enter does what a click would.
+fn check_keyboard_focus() {
+    use rotulus_layout::FocusItem;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let view = crate::view::RotulusView::new();
+    view.set_indent(true);
+    let al = view.append(message_row(7, "al", "see https://example.com now"));
+    let bo = view.append(message_row(8, "bo", "plain"));
+    let holder = laid_out(&view);
+    let window = gtk4::Window::new();
+    window.set_child(Some(&holder));
+    holder.allocate(400, 300, -1, None);
+    let focused = || view.imp_ref().focus_item.borrow().clone();
+
+    assert!(view.child_focus(gtk4::DirectionType::TabForward));
+    assert!(view.is_focus(), "Tab from outside lands on the view");
+    assert_eq!(focused(), None, "as a whole, not on an item");
+
+    let mut seen = Vec::new();
+    while view.child_focus(gtk4::DirectionType::TabForward) {
+        let item = focused().expect("each Tab inside lands on an item");
+        assert!(
+            view.item_boxes(&item)
+                .iter()
+                .all(|r| r.width() > 0.0 && r.y() >= 0.0 && r.y() < 300.0),
+            "{item:?} is drawn on screen"
+        );
+        seen.push(item);
+    }
+    assert!(
+        matches!(
+            seen.as_slice(),
+            [
+                FocusItem::Speaker { message: a },
+                FocusItem::Link { message: l, .. },
+                FocusItem::Speaker { message: b },
+            ] if *a == al && *l == al && *b == bo
+        ),
+        "reading order: {seen:?}"
+    );
+    assert_eq!(focused(), None, "past the last item, focus leaves");
+
+    assert!(view.is_focus());
+    assert!(
+        !view.child_focus(gtk4::DirectionType::TabBackward),
+        "Shift+Tab from the view as a whole leaves backward"
+    );
+
+    gtk4::prelude::GtkWindowExt::set_focus(&window, None::<&gtk4::Widget>);
+    assert!(view.child_focus(gtk4::DirectionType::TabBackward));
+    assert_eq!(
+        focused(),
+        Some(FocusItem::Speaker { message: bo }),
+        "Shift+Tab from outside takes the last item on screen"
+    );
+    let mut back = vec![focused().unwrap()];
+    while view.child_focus(gtk4::DirectionType::TabBackward) {
+        match focused() {
+            Some(item) => back.push(item),
+            None => break,
+        }
+    }
+    back.reverse();
+    assert_eq!(back, seen, "Shift+Tab visits the same items");
+    assert_eq!(
+        focused(),
+        None,
+        "before the first item: the view as a whole"
+    );
+    assert!(!view.child_focus(gtk4::DirectionType::TabBackward));
+    for _ in 0..3 {
+        assert!(view.child_focus(gtk4::DirectionType::TabForward));
+    }
+    assert_eq!(focused(), Some(FocusItem::Speaker { message: bo }));
+    let activated = Rc::new(Cell::new(0u64));
+    let got = activated.clone();
+    view.connect_local("speaker-activated", false, move |args| {
+        got.set(args[1].get::<u64>().unwrap());
+        None
+    });
+    assert!(view.activate_focused());
+    assert_eq!(
+        activated.get(),
+        8,
+        "Enter activates the item as a click does"
+    );
+
+    // The Menu key on the view as a whole opens its menu, with focus in
+    // it; closing the menu gives focus back to the view.
+    let ctx = gtk4::glib::MainContext::default();
+    let settle = || {
+        for _ in 0..100 {
+            ctx.iteration(false);
+        }
+    };
+    window.present();
+    settle();
+    view.imp_ref().focus_item.replace(None);
+    assert!(view.grab_focus());
+    view.open_focused_menu();
+    settle();
+    let popover = {
+        let mut child = window.first_child();
+        loop {
+            let c = child.expect("the menu is parented to the window");
+            if let Ok(p) = c.clone().downcast::<gtk4::Popover>() {
+                break p;
+            }
+            child = c.next_sibling();
+        }
+    };
+    assert!(
+        gtk4::prelude::GtkWindowExt::focus(&window).is_some_and(|f| f.is_ancestor(&popover)),
+        "the menu takes focus, so its rows work from the keyboard"
+    );
+    popover.popdown();
+    settle();
+    assert!(
+        view.is_focus(),
+        "closing the menu returns focus to the view"
+    );
+    window.destroy();
 }
 
 /// A change to the desktop's text scale throws away every measurement.

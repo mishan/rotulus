@@ -16,13 +16,14 @@ set -eu
 cd "$(dirname "$0")/../crates/rotulus"
 
 xgettext_rs() {
-    xgettext --language=Rust --from-code=UTF-8 --keyword=tr:1 "$@"
+    xgettext --language=Rust --from-code=UTF-8 --keyword=tr:1 --keyword=trc:1c,2 \
+        --add-comments=Translators: "$@"
 }
 
 # Which sources actually yield a msgid. The grep only narrows the
 # candidates: it would also match a tr( with no literal to extract.
 expected=$(
-    for f in $(grep -rlE '\btr[[:space:]]*\(' --include='*.rs' src | sort); do
+    for f in $(grep -rlE '\btrc?[[:space:]]*\(' --include='*.rs' src | sort); do
         if xgettext_rs -o - "$f" 2>/dev/null | grep -q '^msgid "..*"'; then
             echo "$f"
         fi

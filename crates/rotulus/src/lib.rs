@@ -45,6 +45,18 @@ pub(crate) fn tr(s: &str) -> String {
     }
 }
 
+/// Translate `s` in `context`, as `pgettext` does: for a short string
+/// that could mean several things.
+pub(crate) fn trc(context: &str, s: &str) -> String {
+    let key = format!("{context}\u{4}{s}");
+    let t = tr(&key);
+    if t == key {
+        s.to_owned()
+    } else {
+        t
+    }
+}
+
 /// Tell gtk4-rs that GTK is already initialized, when it is.
 ///
 /// An application written in C calls `gtk_init` itself, so gtk4-rs's own
