@@ -841,16 +841,19 @@ fn check_keyboard_focus() {
         "Enter activates the item as a click does"
     );
 
-    // The Menu key on the view as a whole opens its menu, with focus in
-    // it; closing the menu gives focus back to the view.
+    // The Menu key on the view as a whole opens its menu, whose rows take
+    // keyboard focus; closing the menu gives focus back to the view.
+    //
+    // Whether the popover grabs focus by itself on showing depends on the
+    // window being active, which takes a window manager; Xvfb has none.
+    // So the window isn't presented, and focus is moved into the menu the
+    // way Tab moves it there.
     let ctx = gtk4::glib::MainContext::default();
     let settle = || {
         for _ in 0..100 {
             ctx.iteration(false);
         }
     };
-    window.present();
-    settle();
     view.imp_ref().focus_item.replace(None);
     assert!(view.grab_focus());
     view.open_focused_menu();
@@ -865,10 +868,25 @@ fn check_keyboard_focus() {
             child = c.next_sibling();
         }
     };
+    // Which row holds the focus takes an active window, and Xvfb has no
+    // window manager to make one: what matters, and what this checks, is
+    // that every row can take it.
+    let mut rows = Vec::new();
+    let mut child = popover.child().and_then(|b| b.first_child());
+    while let Some(c) = child {
+        if c.is::<gtk4::Button>() {
+            rows.push(c.clone());
+        }
+        child = c.next_sibling();
+    }
+    assert!(!rows.is_empty(), "the menu has rows");
     assert!(
-        gtk4::prelude::GtkWindowExt::focus(&window).is_some_and(|f| f.is_ancestor(&popover)),
-        "the menu takes focus, so its rows work from the keyboard"
+        rows.iter().all(|r| r.is_focusable()),
+        "the menu's rows take focus, so they work from the keyboard"
     );
+    // Away from the view first, so getting it back is the menu's doing.
+    gtk4::prelude::GtkWindowExt::set_focus(&window, None::<&gtk4::Widget>);
+    assert!(!view.is_focus());
     popover.popdown();
     settle();
     assert!(
@@ -962,10 +980,18 @@ fn message_row(key: u64, nick: &str, body: &str) -> rotulus_layout::Message {
 /// boxes to find.
 fn laid_out(view: &crate::view::RotulusView) -> gtk4::Box {
     use gtk4::subclass::prelude::WidgetImpl;
-    let adj = gtk4::Adjustment::new(0.0, 0.0, 1.0, 1.0, 1.0, 1.0);
-    view.set_vadjustment(Some(&adj));
-    let holder = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-    holder.append(view);
+    // A view laid out once already is laid out again where it is, after
+    // whatever was appended since.
+    let holder = match view.parent().and_then(|p| p.downcast::<gtk4::Box>().ok()) {
+        Some(holder) => holder,
+        None => {
+            let adj = gtk4::Adjustment::new(0.0, 0.0, 1.0, 1.0, 1.0, 1.0);
+            view.set_vadjustment(Some(&adj));
+            let holder = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+            holder.append(view);
+            holder
+        }
+    };
     holder.allocate(400, 300, -1, None);
     view.imp_ref().snapshot(&gtk4::Snapshot::new());
     holder.allocate(400, 300, -1, None);
@@ -1244,6 +1270,12 @@ fn check_offscreen_animation_stops() {
     use gtk4::prelude::*;
     use gtk4::subclass::prelude::WidgetImpl;
 
+    // Animating at all depends on the desktop allowing it; the check must
+    // not depend on the desktop it runs on.
+    let settings = gtk4::Settings::default().expect("GTK is initialized");
+    let desktop = settings.is_gtk_enable_animations();
+    settings.set_gtk_enable_animations(true);
+
     let view = crate::view::RotulusView::new();
     let adj = gtk4::Adjustment::new(0.0, 0.0, 1.0, 1.0, 1.0, 1.0);
     view.set_vadjustment(Some(&adj));
@@ -1318,7 +1350,6 @@ fn check_offscreen_animation_stops() {
 
     // The desktop's animations turned off: the tick stops at once and the
     // image goes back to its first frame, and stays there.
-    let settings = gtk4::Settings::default().expect("GTK is initialized");
     view.imp_ref()
         .media
         .borrow_mut()
@@ -1336,6 +1367,7 @@ fn check_offscreen_animation_stops() {
     settings.set_gtk_enable_animations(true);
     frame();
     assert!(ticking(), "animations back on, the next paint starts it");
+    settings.set_gtk_enable_animations(desktop);
 }
 
 // ---- run-based append ------------------------------------------------

@@ -23,6 +23,10 @@ jobs:
       CARGO_TERM_COLOR: always
       # The container has no Wayland socket; don't let GDK look for one.
       GDK_BACKEND: x11
+      # Nor GLES, which libepoxy aborts the process for when a test
+      # realizes a widget (the context menu's popover); cairo draws
+      # without it.
+      GSK_RENDERER: cairo
     steps:
       - uses: actions/checkout@v4
 
