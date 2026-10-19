@@ -277,7 +277,7 @@ mod tests {
             rotulus_message_add_text(m, c"there".as_ptr(), 4, 0);
             let copy = rotulus_message_copy(m);
             rotulus_message_free(m);
-            (*copy).with_row(|row| {
+            copy.as_ref().unwrap().with_row(|row| {
                 assert_eq!(row.kind, ROW_SYSTEM);
                 assert_eq!(row.speaker.key, 9);
                 let nick = std::slice::from_raw_parts(
