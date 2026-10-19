@@ -20,7 +20,7 @@ rotulus-layout = { path = "crates/rotulus-layout", version = "0.2.0" }
 rotulus-mirc = { path = "crates/rotulus-mirc", version = "0.2.0" }
 glib = "0.22"
 gtk4 = "0.11"
-criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 [profile.dev]
 debug = "line-tables-only"
