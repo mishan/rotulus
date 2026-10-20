@@ -31,7 +31,7 @@ jobs:
       # without it.
       GSK_RENDERER: cairo
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
         run: |
@@ -98,7 +98,7 @@ jobs:
       CARGO_TERM_COLOR: always
       GDK_BACKEND: x11
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
         run: |
