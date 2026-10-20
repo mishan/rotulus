@@ -401,8 +401,50 @@ fn check(name: &str, texture: &gtk::gdk::Texture) -> Option<String> {
     ))
 }
 
+/// What a screen reader is given when it asks for the view's text
+/// attributes, through the interface calls GTK makes for it: the defaults,
+/// then those at the start.
+#[cfg(feature = "v4_14")]
+fn text_attributes(view: &RotulusView) -> [Vec<(String, String)>; 2] {
+    use glib::translate::FromGlibPtrContainer;
+    // GTK walks both lists to their terminator without checking for null.
+    unsafe fn pairs(
+        names: *mut *mut std::ffi::c_char,
+        values: *mut *mut std::ffi::c_char,
+    ) -> Vec<(String, String)> {
+        assert!(
+            !names.is_null() && !values.is_null(),
+            "text attributes: a null list"
+        );
+        let names: Vec<String> = unsafe { FromGlibPtrContainer::from_glib_full(names) };
+        let values: Vec<String> = unsafe { FromGlibPtrContainer::from_glib_full(values) };
+        names.into_iter().zip(values).collect()
+    }
+    unsafe {
+        let instance = view.as_ptr() as *mut glib::gobject_ffi::GTypeInstance;
+        let iface = &*(glib::gobject_ffi::g_type_interface_peek(
+            (*instance).g_class as *mut _,
+            gtk::ffi::gtk_accessible_text_get_type(),
+        ) as *const gtk::ffi::GtkAccessibleTextInterface);
+        let (mut names, mut values) = (std::ptr::null_mut(), std::ptr::null_mut());
+        iface.get_default_attributes.unwrap()(instance as *mut _, &mut names, &mut values);
+        let defaults = pairs(names, values);
+        let (mut n, mut ranges) = (0, std::ptr::null_mut());
+        iface.get_attributes.unwrap()(
+            instance as *mut _,
+            0,
+            &mut n,
+            &mut ranges,
+            &mut names,
+            &mut values,
+        );
+        glib::ffi::g_free(ranges as *mut _);
+        [defaults, pairs(names, values)]
+    }
+}
+
 #[test]
-fn scenes_match_their_goldens() {
+fn scenes_draw_and_read_as_promised() {
     pin_environment();
     assert!(
         gtk::init().is_ok(),
@@ -426,4 +468,16 @@ fn scenes_match_their_goldens() {
     .filter_map(|(name, scene)| check(name, &render(&scene())))
     .collect();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+
+    #[cfg(feature = "v4_14")]
+    {
+        for attrs in text_attributes(&view()) {
+            for want in [("family-name", "DejaVu Sans Mono"), ("size", "10")] {
+                assert!(
+                    attrs.iter().any(|(n, v)| (n.as_str(), v.as_str()) == want),
+                    "text attributes {attrs:?} lack {want:?}"
+                );
+            }
+        }
+    }
 }

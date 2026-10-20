@@ -505,15 +505,32 @@ mod glue {
             .unwrap_or_default()
         }
 
+        // The whole text has the defaults, and no list here is ever empty:
+        // gtk4-rs hands GTK a null list for an empty one, which GTK walks
+        // unchecked when a screen reader asks for an attribute or the
+        // defaults, and crashes.
         fn attributes(
             &self,
             _offset: u32,
         ) -> Vec<(gtk4::AccessibleTextRange, glib::GString, glib::GString)> {
-            Vec::new()
+            let len = self.obj().with_a11y(|m, _| Some(m.char_len())).unwrap_or(0);
+            let whole = gtk4::AccessibleTextRange::new(0, len as usize);
+            self.default_attributes()
+                .into_iter()
+                .map(|(name, value)| (whole, name, value))
+                .collect()
         }
 
         fn default_attributes(&self) -> Vec<(glib::GString, glib::GString)> {
-            Vec::new()
+            let font = self.measure.borrow().scaled_font();
+            let mut attrs = vec![(
+                gtk4::ACCESSIBLE_ATTRIBUTE_SIZE.into(),
+                (font.size() / pango::SCALE).to_string().into(),
+            )];
+            if let Some(family) = font.family() {
+                attrs.push((gtk4::ACCESSIBLE_ATTRIBUTE_FAMILY.into(), family));
+            }
+            attrs
         }
 
         #[cfg(feature = "v4_16")]
