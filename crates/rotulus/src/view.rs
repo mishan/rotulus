@@ -3867,9 +3867,10 @@ impl RotulusView {
         };
         self.a11y_move_caret(Some(Selection::new(caret, caret)));
         // Translators: what a screen reader says when keyboard focus lands
-        // on an item: its text, then what it is ("link", "user").
+        // on an item: its text, then what it is ("link", "user"). The text
+        // alone is said when it already starts with what it is.
         let said = crate::trc("item announcement", "{text}, {kind}");
-        self.a11y_announce(&said.replace("{text}", &text).replace("{kind}", &kind));
+        self.a11y_announce(&crate::a11y::announcement(&said, &text, &kind));
     }
 
     /// Enter or Space: do what a click on the focused item does. `false`
