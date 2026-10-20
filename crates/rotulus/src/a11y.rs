@@ -428,6 +428,26 @@ impl TextModel {
     }
 }
 
+/// What a screen reader says as keyboard focus lands on an item: `said`
+/// (the translated "{text}, {kind}") filled in, or the text alone when
+/// it already starts by saying what the item is, as a host's "[image · PNG]"
+/// does, rather than say it twice.
+pub(crate) fn announcement(said: &str, text: &str, kind: &str) -> String {
+    let lead = text
+        .trim_start_matches(|c: char| !c.is_alphanumeric())
+        .to_lowercase();
+    if lead
+        .strip_prefix(&kind.to_lowercase())
+        // A word of its own, not "link.example.com" or "user.name".
+        .is_some_and(|rest| {
+            rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace() || "·:,;)]".contains(c))
+        })
+    {
+        return text.to_owned();
+    }
+    said.replace("{text}", text).replace("{kind}", kind)
+}
+
 /// `GtkAccessibleTextGranularity`, without depending on GTK 4.14 to name
 /// it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -738,6 +758,25 @@ mod tests {
             b.append(r.clone(), &m);
         }
         b
+    }
+
+    #[test]
+    fn an_announcement_names_the_kind_once() {
+        for (text, kind, want) in [
+            ("example.com", "link", "example.com, link"),
+            (
+                "[image · PNG · click to view]",
+                "image",
+                "[image · PNG · click to view]",
+            ),
+            ("Image of a cat", "image", "Image of a cat"),
+            ("imagery.png", "image", "imagery.png, image"),
+            ("link.example.com", "link", "link.example.com, link"),
+            ("user.name", "user", "user.name, user"),
+            ("a cat", "image", "a cat, image"),
+        ] {
+            assert_eq!(announcement("{text}, {kind}", text, kind), want, "{text:?}");
+        }
     }
 
     #[test]
