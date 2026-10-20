@@ -135,7 +135,7 @@ jobs:
       # The API reference, as a Pages artifact: downloadable from any run,
       # and what the deploy job publishes from main.
       - name: Keep the API reference
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: _build/rotulus-1
 
