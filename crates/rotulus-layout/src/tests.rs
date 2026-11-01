@@ -4003,3 +4003,332 @@ fn focus_steps_through_items_in_reading_order_and_off_the_ends() {
         "an item scrolled away starts again from what is on screen"
     );
 }
+
+// ----------------------------------------------------------------- replies
+
+use crate::buffer::ReplyChange;
+use crate::message::Reply;
+use crate::wrap::{estimate_row_height, layout_row};
+
+fn quote(nick: &str, excerpt: &str) -> Reply {
+    Reply::Quote {
+        nick: nick.into(),
+        color: crate::span::ColorRef::Default,
+        excerpt: excerpt.into(),
+    }
+}
+
+#[test]
+fn a_reply_header_takes_the_first_line_and_the_rest_moves_below_it() {
+    let m = FixedMeasure::new(8);
+    let mut p = params(400);
+    p.indent = true;
+    p.indent_width = 80;
+    p.avatar_size = 32;
+    let msg = nick_row("al", "hello");
+    let gen = LayoutGeneration::default();
+    let plain = layout_message(&msg, &p, gen, &m);
+    let l = layout_row(&msg, Some(&quote("bo", "hi")), &p, gen, &m);
+    let r = **l.reply.as_ref().expect("a header");
+    assert_eq!(
+        (r.x, r.y, r.height),
+        (80, 0, 16),
+        "over the body column, on the row's first line"
+    );
+    assert_eq!(l.height, plain.height + 16);
+    for (was, now) in plain.lines.iter().zip(&l.lines) {
+        assert_eq!(now.y, was.y + 16, "{:?} moves down a line", now.source);
+        assert_eq!((now.x, &now.range), (was.x, &was.range));
+    }
+    assert_eq!(
+        l.avatar.map(|a| a.y),
+        Some(16),
+        "the avatar stays beside the nick"
+    );
+    // Two spaces' width for the bar, the nick, a space, the excerpt.
+    let n = r.nick.expect("a quote names its author");
+    assert_eq!((n.x, n.width, n.len, n.ellipsis), (96, 16, 2, false));
+    assert_eq!(
+        (r.text.x, r.text.width, r.text.len, r.text.ellipsis),
+        (120, 16, 2, false)
+    );
+    assert_eq!(r.x + r.width, 136, "the header ends where its text does");
+    assert_eq!(
+        (plain.stamp_y(), l.stamp_y()),
+        (0, 16),
+        "the timestamp tops what is below the header, as it tops a row"
+    );
+}
+
+#[test]
+fn in_one_column_the_header_starts_where_the_nick_does() {
+    let m = FixedMeasure::new(8);
+    let mut p = params(400);
+    p.stamp_width = 40;
+    let l = layout_row(
+        &nick_row("al", "hello"),
+        Some(&quote("bo", "hi")),
+        &p,
+        LayoutGeneration::default(),
+        &m,
+    );
+    assert_eq!(l.reply.as_ref().map(|r| (r.x, r.y)), Some((40, 0)));
+    let gutter = &l.lines[0];
+    assert_eq!(gutter.source, crate::wrap::LineSource::Gutter);
+    assert_eq!((gutter.x, gutter.y), (40, 16));
+    assert_eq!(l.lines[1].y, 16, "the body stays beside the nick");
+    assert_eq!(l.stamp_y(), 16, "and so does the timestamp");
+}
+
+#[test]
+fn a_header_is_cut_to_its_line_with_an_ellipsis() {
+    // 8px characters, from x 0 in one column: the bar's 16px, the nick,
+    // 8px, then the text.
+    let m = FixedMeasure::new(8);
+    let long = "a much longer excerpt than fits";
+    let name = "someone_with_a_long_name";
+    for (reply, width, nick, text) in [
+        (quote("bo", "short"), 200, Some((2, false)), (5, false)),
+        // "a much " fits before the ellipsis; the space before it goes.
+        (quote("bo", long), 104, Some((2, false)), (6, true)),
+        // The nick takes about half, and the excerpt what is left.
+        (quote(name, long), 100, Some((5, true)), (1, true)),
+        // Not even an ellipsis fits: the bar alone.
+        (quote("bo", long), 10, Some((0, false)), (0, false)),
+        (Reply::Unavailable("deleted".into()), 200, None, (7, false)),
+    ] {
+        let l = layout_row(
+            &Message::system(ParsedText::plain("body")),
+            Some(&reply),
+            &params(width),
+            LayoutGeneration::default(),
+            &m,
+        );
+        let r = *l.reply.unwrap();
+        assert_eq!(
+            r.nick.map(|n| (n.len, n.ellipsis)),
+            nick,
+            "{reply:?} at {width}"
+        );
+        assert_eq!((r.text.len, r.text.ellipsis), text, "{reply:?} at {width}");
+        assert!(
+            r.x + r.width <= width,
+            "{reply:?} draws past the edge at {width}"
+        );
+        for t in r.nick.iter().chain([&r.text]) {
+            let ellipsis = if t.ellipsis { 8 } else { 0 };
+            assert_eq!(t.width, t.len as u32 * 8 + ellipsis, "{reply:?} at {width}");
+        }
+    }
+}
+
+#[test]
+fn a_header_is_never_under_estimated() {
+    let m = FixedMeasure::new(10);
+    let mut two = params(400);
+    two.indent = true;
+    two.indent_width = 80;
+    two.avatar_size = 32;
+    let mut one = params(100);
+    one.stamp_width = 20;
+    for p in [two, one] {
+        for msg in [nick_row("al", "hi"), nick_row("someone", "a\nb\nc")] {
+            for reply in [quote("bo", "hi"), Reply::Unavailable("gone".into())] {
+                let real = layout_row(&msg, Some(&reply), &p, LayoutGeneration::default(), &m);
+                let est = estimate_row_height(&msg, Some(&reply), &p, &m);
+                assert!(est >= real.height, "estimated {est} below {}", real.height);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_reply_set_later_grows_its_row_and_outlives_an_edit() {
+    let m = FixedMeasure::new(8);
+    let mut b = ChatBuffer::new(params(400));
+    b.append(nick_row("al", "one"), &m);
+    let id = b.append(nick_row("bo", "two"), &m);
+    b.ensure_layout(1, &m);
+    let before = b.layout_at(1).unwrap().height;
+    assert_eq!(
+        b.set_reply(id, Some(quote("al", "one")), &m),
+        ReplyChange::Changed
+    );
+    assert!(b.layout_at(1).is_none(), "the old layout is stale");
+    assert_eq!(b.ensure_layout(1, &m), before + 16);
+    assert_eq!(
+        b.set_reply(id, Some(quote("al", "one")), &m),
+        ReplyChange::Unchanged
+    );
+    assert!(
+        b.layout_at(1).is_some(),
+        "the same header again keeps the measured row"
+    );
+    assert!(b.replace(id, nick_row("bo", "two, edited"), &m));
+    assert_eq!(b.reply(id), Some(&quote("al", "one")), "an edit keeps it");
+    assert_eq!(b.ensure_layout(1, &m), before + 16);
+    assert_eq!(b.set_reply(id, None, &m), ReplyChange::Changed);
+    assert_eq!(b.ensure_layout(1, &m), before);
+}
+
+#[test]
+fn a_reply_goes_with_its_row() {
+    let m = FixedMeasure::new(8);
+    for how in ["remove", "trim", "clear"] {
+        let mut b = ChatBuffer::new(params(400));
+        let id = b.append(nick_row("al", "one"), &m);
+        b.set_reply(id, Some(quote("bo", "hi")), &m);
+        match how {
+            "remove" => assert!(b.remove(id, &m)),
+            "trim" => {
+                b.set_max_rows(1, &m);
+                b.append(nick_row("bo", "two"), &m);
+            }
+            _ => b.clear(),
+        }
+        assert_eq!(b.reply(id), None, "{how}: a stale mark has no reply");
+        assert_eq!(
+            b.set_reply(id, Some(quote("bo", "hi")), &m),
+            ReplyChange::Gone,
+            "{how}: and takes none"
+        );
+    }
+}
+
+#[test]
+fn a_reply_is_kept_to_one_line() {
+    let m = FixedMeasure::new(8);
+    let mut b = ChatBuffer::new(params(400));
+    let id = b.append(nick_row("al", "one"), &m);
+    let long = "x".repeat(400);
+    let cut = format!("{}\u{2026}", "x".repeat(300));
+    for (set, want) in [
+        (
+            quote("b\no", "line one\nline two\tend"),
+            quote("b o", "line one line two end"),
+        ),
+        (
+            quote("al", "Pango\u{2028}breaks\u{2029}here"),
+            quote("al", "Pango breaks here"),
+        ),
+        (
+            Reply::Unavailable("not\r\nhere".into()),
+            Reply::Unavailable("not  here".into()),
+        ),
+        // Cut before it is ever shaped, and read no further either.
+        (quote(&long, &long), quote(&cut, &cut)),
+    ] {
+        b.set_reply(id, Some(set), &m);
+        assert_eq!(b.reply(id), Some(&want));
+    }
+}
+
+#[test]
+fn a_row_with_a_header_starts_a_group() {
+    let m = FixedMeasure::new(8);
+    let mut b = ChatBuffer::new(params(400));
+    b.append(nick_row("al", "one"), &m);
+    let id = b.append(nick_row("al", "two"), &m);
+    let grouped = |b: &ChatBuffer| {
+        b.message_at(1)
+            .unwrap()
+            .flags
+            .contains(crate::message::MessageFlags::GROUPED)
+    };
+    assert!(grouped(&b));
+    b.set_reply(id, Some(quote("bo", "hi")), &m);
+    assert!(!grouped(&b), "its quote isn't part of the message above");
+    b.set_reply(id, None, &m);
+    assert!(grouped(&b));
+}
+
+#[test]
+fn a_point_on_a_header_finds_it_and_beside_it_finds_nothing_else() {
+    let m = FixedMeasure::new(8);
+    let mut p = params(400);
+    p.indent = true;
+    let mut b = ChatBuffer::new(p);
+    let id = b.append(nick_row("al", "one"), &m);
+    b.set_reply(id, Some(quote("bo", "hi")), &m);
+    b.ensure_visible(0, 200, &m);
+    let r = **b.layout_at(0).unwrap().reply.as_ref().unwrap();
+    let (x, end) = (r.x as i32, (r.x + r.width) as i32);
+    assert_eq!(b.reply_at(x, 1), Some((id, true)));
+    assert_eq!(b.reply_at(end - 1, 15), Some((id, true)));
+    assert_eq!(
+        b.reply_at(end + 5, 1),
+        Some((id, false)),
+        "beside the header"
+    );
+    assert_eq!(
+        b.reply_at(2, 1),
+        Some((id, false)),
+        "over the gutter, above the nick"
+    );
+    assert_eq!(b.reply_at(x, 17), None, "the body's line");
+    let c = b.hit_test(x + 1, 17, &m).unwrap();
+    assert_eq!(
+        (c.source, c.offset),
+        (LineSource::Block(0), 0),
+        "the body is where it is drawn"
+    );
+}
+
+#[test]
+fn a_header_is_not_part_of_the_rows_text() {
+    let m = FixedMeasure::new(8);
+    let mut b = ChatBuffer::new(params(400));
+    let id = b.append(nick_row("al", "one"), &m);
+    b.set_reply(id, Some(quote("bo", "quoted words")), &m);
+    let sel = b.select_row(0).unwrap();
+    assert_eq!(
+        b.selected_text(&sel),
+        "<al> one",
+        "copying leaves the quote out"
+    );
+    assert!(b.search("quoted", false).is_empty(), "and so does search");
+}
+
+#[test]
+fn a_header_is_the_first_thing_focus_reaches_on_its_row() {
+    let m = FixedMeasure::new(8);
+    let mut p = params(400);
+    p.indent = true;
+    let mut b = ChatBuffer::new(p);
+    let id = b.append(nick_row("al", "see https://example.com"), &m);
+    let plain = b.focus_items(0);
+    b.set_reply(id, Some(quote("bo", "hi")), &m);
+    let items = b.focus_items(0);
+    assert_eq!(items[0], crate::focus::FocusItem::Reply { message: id });
+    assert_eq!(items[1..], plain[..], "then what the row had before");
+}
+
+#[test]
+fn a_prefix_that_overshoots_its_budget_is_cut_back_not_dropped() {
+    // A shaping measurer can answer a prefix a pixel wider than asked;
+    // this one always answers a character more.
+    struct Overshoot(FixedMeasure);
+    impl TextMeasure for Overshoot {
+        fn metrics(&self) -> crate::measure::FontMetrics {
+            self.0.metrics()
+        }
+        fn run_width(&self, text: &str, style: Style) -> u32 {
+            self.0.run_width(text, style)
+        }
+        fn fit_prefix(&self, text: &str, style: Style, max: u32) -> (usize, u32) {
+            let (len, _) = self.0.fit_prefix(text, style, max);
+            let len = (len + 1).min(text.len());
+            (len, self.run_width(&text[..len], style))
+        }
+    }
+    let l = layout_row(
+        &Message::system(ParsedText::plain("body")),
+        Some(&Reply::Unavailable("abcdefghijklmnop".into())),
+        &params(80),
+        LayoutGeneration::default(),
+        &Overshoot(FixedMeasure::new(8)),
+    );
+    let t = l.reply.unwrap().text;
+    // 80px less the bar's 16 is 64: seven characters and the ellipsis.
+    assert_eq!((t.len, t.width, t.ellipsis), (7, 64, true));
+}

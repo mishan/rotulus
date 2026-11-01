@@ -21,7 +21,7 @@ use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
 use rotulus_layout::{
     Caret, ChatBuffer, ColorRef, FocusItem, LayoutParams, LineSource, Message, MessageId,
-    ParsedText, RowSelection, Selection, Span, Style, TextMeasure, MIN_INDENT,
+    ParsedText, Reply, RowSelection, Selection, Span, Style, TextMeasure, MIN_INDENT,
 };
 
 use crate::measure::PangoMeasure;
@@ -43,6 +43,8 @@ pub const PAL_RULE: usize = 46;
 /// the theme exactly as they were for xtext.
 pub const PAL_MARK_FG: usize = 32;
 pub const PAL_MARK_BG: usize = 33;
+/// `ROTULUS_PAL_NICK` — other people's nicks, and a quoted one's default.
+pub const PAL_NICK: usize = 39;
 /// `ROTULUS_PAL_NICK_COLOR0` — the first per-nick color.
 pub const PAL_NICK_COLOR0: usize = 47;
 /// `ROTULUS_PAL_MARKER` — the last-read marker line.
@@ -100,6 +102,65 @@ pub enum LoadDirection {
     Newer = 1,
 }
 
+/// A row, as the signals that name one hand it over: a `RotulusMark` to C
+/// and the language bindings, so the application can come back to the row
+/// with the mark it was given at append.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RowMark(pub MessageId);
+
+impl glib::types::StaticType for RowMark {
+    fn static_type() -> glib::Type {
+        use glib::translate::FromGlib;
+        unsafe { glib::Type::from_glib(crate::ffi::rotulus_mark_get_type()) }
+    }
+}
+
+impl glib::value::ValueType for RowMark {
+    type Type = RowMark;
+}
+
+unsafe impl<'a> glib::value::FromValue<'a> for RowMark {
+    type Checker = glib::value::GenericValueTypeOrNoneChecker<Self>;
+
+    // The checker has refused a NULL, which is no row; a handler that may
+    // be given one takes an `Option<RowMark>`.
+    unsafe fn from_value(value: &'a glib::Value) -> Self {
+        use glib::translate::ToGlibPtr;
+        let p = glib::gobject_ffi::g_value_get_boxed(value.to_glib_none().0);
+        RowMark(MessageId(p as usize as u64))
+    }
+}
+
+impl glib::value::ValueTypeOptional for RowMark {}
+
+impl glib::value::ToValueOptional for RowMark {
+    fn to_value_optional(s: Option<&Self>) -> glib::Value {
+        match s {
+            Some(m) => glib::value::ToValue::to_value(m),
+            None => glib::Value::from_type(<Self as glib::types::StaticType>::static_type()),
+        }
+    }
+}
+
+impl glib::value::ToValue for RowMark {
+    fn to_value(&self) -> glib::Value {
+        use glib::translate::ToGlibPtrMut;
+        let mut v = glib::Value::from_type(<Self as glib::types::StaticType>::static_type());
+        // The boxed copy is the identity, so the value holds the id itself.
+        unsafe {
+            glib::gobject_ffi::g_value_set_boxed(
+                v.to_glib_none_mut().0,
+                crate::ffi::mark_to_ptr(self.0),
+            )
+        };
+        v
+    }
+
+    fn value_type(&self) -> glib::Type {
+        <Self as glib::types::StaticType>::static_type()
+    }
+}
+
 impl From<rotulus_layout::LoadMoreDirection> for LoadDirection {
     fn from(d: rotulus_layout::LoadMoreDirection) -> Self {
         match d {
@@ -138,9 +199,22 @@ pub(crate) enum HoverTarget {
     },
     /// An inline image, decoded or still showing its placeholder.
     Media { message: MessageId, token: u32 },
+    /// A row's reply header.
+    Reply { message: MessageId },
 }
 
 impl HoverTarget {
+    /// The row the target is on.
+    fn message(&self) -> MessageId {
+        match self {
+            HoverTarget::Link { message, .. }
+            | HoverTarget::Nick { message, .. }
+            | HoverTarget::LoadMore { message, .. }
+            | HoverTarget::Media { message, .. }
+            | HoverTarget::Reply { message } => *message,
+        }
+    }
+
     /// The (message, source, range) this target underlines, if any.
     fn underline(&self) -> Option<(MessageId, LineSource, std::ops::Range<usize>)> {
         match self {
@@ -153,9 +227,10 @@ impl HoverTarget {
             // The whole gutter underlines, and so does the whole of a
             // load-more row; the draw path handles both by range rather
             // than specially — see hover_range_for.
-            HoverTarget::Nick { .. } | HoverTarget::LoadMore { .. } | HoverTarget::Media { .. } => {
-                None
-            }
+            HoverTarget::Nick { .. }
+            | HoverTarget::LoadMore { .. }
+            | HoverTarget::Media { .. }
+            | HoverTarget::Reply { .. } => None,
         }
     }
 }
@@ -524,6 +599,24 @@ pub(crate) mod imp {
                         .build(),
                     // The selection was made, extended or cleared.
                     glib::subclass::Signal::builder("selection-changed").build(),
+                    // (mark) — a primary click on a row's reply header. The
+                    // application knows what the row replies to: it said so.
+                    glib::subclass::Signal::builder("reply-activated")
+                        .param_types([RowMark::static_type()])
+                        .build(),
+                    // (mark, x, y) -> handled. A secondary click on a row
+                    // anywhere a link or a speaker doesn't have a menu of its
+                    // own. Unhandled, the view pops its Copy / Select All.
+                    glib::subclass::Signal::builder("row-menu")
+                        .param_types([
+                            RowMark::static_type(),
+                            f64::static_type(),
+                            f64::static_type(),
+                        ])
+                        .return_type::<bool>()
+                        .run_last()
+                        .accumulator(first_handled)
+                        .build(),
                 ]
             })
         }
@@ -899,6 +992,14 @@ impl RotulusView {
         crate::a11y::RowFormat {
             stamp,
             linkifier: imp.linkifier.borrow().clone(),
+            // Translators: how a screen reader reads a reply's header, before
+            // the reply itself: the quoted author, then a short excerpt of
+            // what they wrote.
+            quote: crate::trc("accessible reply", "replying to {nick}: {excerpt}"),
+            // Translators: the same, when the application can't show the
+            // original; {text} is the application's reason, such as
+            // "Message deleted".
+            unavailable: crate::trc("accessible reply", "replying to a message: {text}"),
         }
     }
 
@@ -1368,6 +1469,33 @@ impl RotulusView {
 
     // ---- content ------------------------------------------------------
 
+    /// Set or clear the reply header of the row `id` names, keeping the
+    /// rest of the row: how a quote fetched after its reply arrives gets on
+    /// screen. Returns `false` when the row is gone.
+    pub fn set_reply(&self, id: MessageId, reply: Option<Reply>) -> bool {
+        use rotulus_layout::ReplyChange;
+        let imp = self.imp_();
+        let change = {
+            let m = imp.measure.borrow();
+            imp.buffer.borrow_mut().set_reply(id, reply, &*m)
+        };
+        if change == ReplyChange::Changed {
+            // Focus on a header that went moves on to what is next on its
+            // row, rather than out of the transcript.
+            if *imp.focus_item.borrow() == Some(FocusItem::Reply { message: id }) {
+                let next = {
+                    let buf = imp.buffer.borrow();
+                    let items = buf.row_of(id).map(|r| buf.focus_items(r));
+                    items.and_then(|i| i.into_iter().next())
+                };
+                imp.focus_item.replace(next);
+            }
+            self.after_content_change();
+            self.a11y_replaced(id);
+        }
+        change != ReplyChange::Gone
+    }
+
     pub fn append(&self, msg: Message) -> MessageId {
         let imp = self.imp_();
         let before = imp.buffer.borrow().len();
@@ -1754,10 +1882,12 @@ impl RotulusView {
             if show_stamp && row_top + i64::from(layout.height) >= 0 && row_top <= i64::from(height)
             {
                 if let Some(stamp) = format_stamp(msg.timestamp, &stamp_format) {
+                    // Beside the nick, below a reply header.
+                    let y = row_top + i64::from(layout.stamp_y());
                     draw_layout.set_attributes(None);
                     draw_layout.set_text(&stamp);
                     snapshot.save();
-                    snapshot.translate(&gtk4::graphene::Point::new(0.0, row_top as f32));
+                    snapshot.translate(&gtk4::graphene::Point::new(0.0, y as f32));
                     snapshot.append_layout(&draw_layout, &stamp_color);
                     snapshot.restore();
                 }
@@ -1844,6 +1974,21 @@ impl RotulusView {
                     ));
                     p.snapshot(snapshot, dw, dh);
                     snapshot.restore();
+                }
+            }
+
+            if let (Some(b), Some(id)) = (layout.reply.as_deref(), buf.id_at(row)) {
+                if let Some(reply) = buf.reply(id) {
+                    let hovered = *imp.hovered.borrow() == Some(HoverTarget::Reply { message: id });
+                    self.draw_reply(
+                        snapshot,
+                        &draw_layout,
+                        reply,
+                        b,
+                        row_top,
+                        hovered,
+                        legibility,
+                    );
                 }
             }
 
@@ -1992,6 +2137,72 @@ impl RotulusView {
         }
 
         snapshot.restore();
+    }
+
+    /// A reply header: a bar in the muted color, then the nick and the
+    /// excerpt as the layout cut them, underlined while hovered.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_reply(
+        &self,
+        snapshot: &gtk4::Snapshot,
+        layout: &pango::Layout,
+        reply: &Reply,
+        b: &rotulus_layout::ReplyBox,
+        row_top: i64,
+        hovered: bool,
+        legibility: Legibility,
+    ) {
+        let y = (row_top + i64::from(b.y)) as f32;
+        let muted = legibility.ink(self.pal(PAL_HISTORY_MUTED), None);
+        // Centered in the room the layout left before the text.
+        let room = b.nick.map_or(b.text.x, |n| n.x) - b.x;
+        snapshot.append_color(
+            &muted,
+            &gtk4::graphene::Rect::new(
+                (b.x + room / 2) as f32 - 1.0,
+                y + 2.0,
+                2.0,
+                b.height.saturating_sub(4) as f32,
+            ),
+        );
+        let draw = |t: &rotulus_layout::ReplyText, text: &str, attrs: rotulus_layout::Attrs, fg| {
+            let mut shown = text.get(..t.len).unwrap_or(text).to_owned();
+            if t.ellipsis {
+                shown.push_str(rotulus_layout::wrap::ELLIPSIS);
+            }
+            if shown.is_empty() {
+                return;
+            }
+            let attrs = if hovered {
+                attrs.union(rotulus_layout::Attrs::UNDERLINE)
+            } else {
+                attrs
+            };
+            layout.set_attributes(Some(&PangoMeasure::attrs_for(Style {
+                attrs,
+                ..Style::default()
+            })));
+            layout.set_text(&shown);
+            snapshot.save();
+            snapshot.translate(&gtk4::graphene::Point::new(t.x as f32, y));
+            snapshot.append_layout(layout, &fg);
+            snapshot.restore();
+        };
+        let text = match reply {
+            Reply::Quote {
+                nick,
+                color,
+                excerpt,
+            } => {
+                if let Some(n) = &b.nick {
+                    let fg = legibility.ink(self.resolve(*color, PAL_NICK), None);
+                    draw(n, nick, Reply::NICK_ATTRS, fg);
+                }
+                excerpt
+            }
+            Reply::Unavailable(t) => t,
+        };
+        draw(&b.text, text, reply.text_attrs(), muted);
     }
 
     /// Draw one visual line as a sequence of styled runs.
@@ -3306,6 +3517,15 @@ impl RotulusView {
             if let Some((message, key)) = hit {
                 return Some(HoverTarget::Nick { message, key });
             }
+            // A header is drawn from the layout's reply box too. Beside it
+            // is nothing: the caret hit-test would answer with the row's
+            // first line, the nick.
+            let reply = imp.buffer.borrow_mut().reply_at(cx, cy);
+            match reply {
+                Some((message, true)) => return Some(HoverTarget::Reply { message }),
+                Some((_, false)) => return None,
+                None => {}
+            }
         }
 
         let caret = self.caret_at(x, y)?;
@@ -3388,13 +3608,22 @@ impl RotulusView {
             Some(HoverTarget::Media { token, .. }) => {
                 self.emit_by_name::<()>("media-activated", &[&token]);
             }
+            Some(HoverTarget::Reply { message }) => {
+                self.emit_by_name::<()>("reply-activated", &[&RowMark(message)]);
+            }
             None => {}
         }
     }
 
+    /// Act on a secondary click at a widget-space point.
+    #[cfg(test)]
+    pub(crate) fn open_menu_at(&self, x: f64, y: f64) {
+        self.open_menu(self.hover_target_at(x, y), x, y);
+    }
+
     /// The menu for `target`, as a secondary click on it opens: a
-    /// person's menu over a nick, the link menu over a link, the view's
-    /// own otherwise.
+    /// person's menu over a nick, the link menu over a link, the row's
+    /// anywhere else on one, and the view's own when nobody handles that.
     fn open_menu(&self, target: Option<HoverTarget>, x: f64, y: f64) {
         match target {
             Some(HoverTarget::Nick { key, .. }) => {
@@ -3406,8 +3635,62 @@ impl RotulusView {
                     self.show_link_menu(&href, x, y);
                 }
             }
-            _ => self.show_context_menu(x, y),
+            // A right-click on the selection is about it: Copy.
+            ref t if !matches!(t, Some(HoverTarget::Reply { .. })) && self.in_selection(x, y) => {
+                self.show_context_menu(x, y)
+            }
+            other => {
+                let row = match other {
+                    Some(t) => Some(t.message()),
+                    None => self.row_at(y),
+                };
+                // Paging and framing rows are the view's, not messages.
+                let row = row.filter(|id| {
+                    self.imp_().buffer.borrow().message(*id).is_some_and(|m| {
+                        !matches!(
+                            m.kind,
+                            rotulus_layout::MessageKind::LoadMore(_)
+                                | rotulus_layout::MessageKind::Divider
+                        )
+                    })
+                });
+                let handled = row.is_some_and(|id| {
+                    self.emit_by_name::<bool>("row-menu", &[&RowMark(id), &x, &y])
+                });
+                if !handled {
+                    self.show_context_menu(x, y);
+                }
+            }
         }
+    }
+
+    /// Whether a widget-space point is on the selection.
+    fn in_selection(&self, x: f64, y: f64) -> bool {
+        let Some(sel) = *self.imp_().selection.borrow() else {
+            return false;
+        };
+        let Some(c) = self.caret_at(x, y) else {
+            return false;
+        };
+        let buf = self.imp_().buffer.borrow();
+        let Some(row) = buf.row_of(c.message) else {
+            return false;
+        };
+        let covered = buf.row_selection(row, &sel);
+        buf.covered_range(row, c.source, &covered)
+            .is_some_and(|r| r.contains(&c.offset))
+    }
+
+    /// The row at widget-space height `y`, if there is one there.
+    fn row_at(&self, y: f64) -> Option<MessageId> {
+        let height = content_height(self.height());
+        let mut buf = self.imp_().buffer.borrow_mut();
+        let cy = ((y as i32) - PAD_Y).max(0) as u64 + buf.scroll_offset(height);
+        if cy >= buf.total_height() {
+            return None;
+        }
+        let row = buf.index_mut().locate(cy)?.row;
+        buf.id_at(row)
     }
 
     /// Open a link with the desktop's handler for it.
@@ -3826,6 +4109,12 @@ impl RotulusView {
                 offset,
             };
             match item {
+                FocusItem::Reply { message } => (
+                    at(LineSource::Block(0), 0),
+                    buf.reply(*message)
+                        .map(|r| self.a11y_format().reply(r))
+                        .unwrap_or_default(),
+                ),
                 FocusItem::Speaker { .. } => (
                     at(LineSource::Gutter, 0),
                     msg.speaker
@@ -3855,6 +4144,8 @@ impl RotulusView {
             }
         };
         let kind = match item {
+            // It takes the reader to another message.
+            FocusItem::Reply { .. } => crate::trc("accessible role", "link"),
             FocusItem::Speaker { .. } => {
                 // Translators: this and the next three name what keyboard
                 // focus can land on in the chat view, read out by a screen
@@ -3890,6 +4181,7 @@ impl RotulusView {
         let buf = self.imp_().buffer.borrow();
         let msg = buf.message(item.message())?;
         Some(match item {
+            FocusItem::Reply { message } => HoverTarget::Reply { message: *message },
             FocusItem::Speaker { message } => HoverTarget::Nick {
                 message: *message,
                 key: msg.speaker.as_ref()?.key,
@@ -3935,17 +4227,17 @@ impl RotulusView {
     /// would open, or the view's own.
     pub(crate) fn open_focused_menu(&self) {
         let item = self.imp_().focus_item.borrow().clone();
-        let (target, (x, y)) = match item {
-            Some(item) => (self.target_of(&item), self.item_point(&item)),
-            None => (
-                None,
-                (
-                    f64::from(self.width()) / 2.0,
-                    f64::from(self.height()) / 2.0,
-                ),
+        match item {
+            Some(item) => {
+                let (x, y) = self.item_point(&item);
+                self.open_menu(self.target_of(&item), x, y);
+            }
+            // Focus on the view as a whole is on no row.
+            None => self.show_context_menu(
+                f64::from(self.width()) / 2.0,
+                f64::from(self.height()) / 2.0,
             ),
-        };
-        self.open_menu(target, x, y);
+        }
     }
 
     /// Where a menu for `item` opens: under its first box.
@@ -3978,6 +4270,11 @@ impl RotulusView {
         let width = |source, range| styled_width(&m, msg, source, range);
         let mut out = Vec::new();
         match item {
+            FocusItem::Reply { .. } => {
+                if let Some(r) = &layout.reply {
+                    out.push(rect(r.x, r.y, r.width, r.height));
+                }
+            }
             FocusItem::Speaker { .. } => {
                 if let Some(av) = layout.avatar {
                     out.push(rect(av.x, av.y, av.size, av.size));

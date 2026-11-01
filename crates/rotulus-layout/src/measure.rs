@@ -79,35 +79,7 @@ pub trait TextMeasure {
     /// `pango_layout_line_index_to_x`-style query rather than paying
     /// `log n` shaping passes.
     fn fit_prefix(&self, text: &str, style: Style, max_width: u32) -> (usize, u32) {
-        if text.is_empty() {
-            return (0, 0);
-        }
-        let full = self.run_width(text, style);
-        if full <= max_width {
-            return (text.len(), full);
-        }
-        let mut lo = 0usize;
-        let mut hi = text.len();
-        let mut best = (0usize, 0u32);
-        while lo < hi {
-            let mut mid = lo + (hi - lo) / 2;
-            // Snap to a char boundary; without this the loop can stall
-            // on a multi-byte character.
-            while mid > lo && !text.is_char_boundary(mid) {
-                mid -= 1;
-            }
-            if mid == lo {
-                break;
-            }
-            let w = self.run_width(&text[..mid], style);
-            if w <= max_width {
-                best = (mid, w);
-                lo = mid;
-            } else {
-                hi = mid;
-            }
-        }
-        best
+        fit_prefix_by_search(self, text, style, max_width)
     }
 
     /// Rendered size of an image block, given its intrinsic size and the
@@ -125,6 +97,46 @@ pub trait TextMeasure {
         let scaled_h = ((h as u64 * max_width as u64) / w as u64) as u32;
         (max_width, scaled_h.max(1))
     }
+}
+
+/// [`TextMeasure::fit_prefix`]'s default: a binary search over
+/// [`TextMeasure::run_width`] on character boundaries, for an
+/// implementation whose faster answer doesn't hold for some text.
+pub fn fit_prefix_by_search<M: TextMeasure + ?Sized>(
+    m: &M,
+    text: &str,
+    style: Style,
+    max_width: u32,
+) -> (usize, u32) {
+    if text.is_empty() {
+        return (0, 0);
+    }
+    let full = m.run_width(text, style);
+    if full <= max_width {
+        return (text.len(), full);
+    }
+    let mut lo = 0usize;
+    let mut hi = text.len();
+    let mut best = (0usize, 0u32);
+    while lo < hi {
+        let mut mid = lo + (hi - lo) / 2;
+        // Snap to a char boundary; without this the loop can stall
+        // on a multi-byte character.
+        while mid > lo && !text.is_char_boundary(mid) {
+            mid -= 1;
+        }
+        if mid == lo {
+            break;
+        }
+        let w = m.run_width(&text[..mid], style);
+        if w <= max_width {
+            best = (mid, w);
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    best
 }
 
 /// Deterministic measurer for tests: every character is `char_width`

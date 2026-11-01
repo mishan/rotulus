@@ -34,6 +34,7 @@ Rotulus is not 1.0 yet, and its API may still change.
   - copy that includes or leaves out timestamps
   - search and zoom
   - inline images
+  - reply headers quoting the original
   - markdown code and quote blocks
   - a last-read marker line
   - a single-column mode for logs
@@ -137,6 +138,7 @@ through signals:
 - `speaker-activated`, `speaker-menu`
 - `load-more`
 - `media-activated`
+- `reply-activated`, `row-menu`
 - `selection-changed`
 
 The API reference for C and the language bindings is at

@@ -2,9 +2,9 @@
 //!
 //! The view draws a transcript, not widgets, so Tab has nothing of GTK's
 //! to move between. These are the things a click does something to — a
-//! speaker, a link, a load-more row, an image — in reading order, so that
-//! the keyboard reaches each of them, in the order they are read, and
-//! nothing else.
+//! reply header, a speaker, a link, a load-more row, an image — in reading
+//! order, so that the keyboard reaches each of them, in the order they are
+//! read, and nothing else.
 
 use std::ops::Range;
 
@@ -15,6 +15,8 @@ use crate::wrap::LineSource;
 /// One thing in the scrollback that does something when activated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FocusItem {
+    /// A row's reply header.
+    Reply { message: MessageId },
     /// A speaker's name in the gutter, and their avatar with it.
     Speaker { message: MessageId },
     /// A link: the text it lives in and its byte range there.
@@ -33,7 +35,8 @@ impl FocusItem {
     /// The row the item is on.
     pub fn message(&self) -> MessageId {
         match self {
-            FocusItem::Speaker { message }
+            FocusItem::Reply { message }
+            | FocusItem::Speaker { message }
             | FocusItem::Link { message, .. }
             | FocusItem::LoadMore { message }
             | FocusItem::Image { message, .. } => *message,
@@ -42,9 +45,9 @@ impl FocusItem {
 }
 
 impl ChatBuffer {
-    /// A row's items, in reading order: the speaker, then each block's
-    /// links or image in turn. A load-more row is one item, whatever it
-    /// says.
+    /// A row's items, in reading order: the reply header, the speaker,
+    /// then each block's links or image in turn. A load-more row is one
+    /// item, whatever it says.
     pub fn focus_items(&self, row: usize) -> Vec<FocusItem> {
         let (Some(message), Some(msg)) = (self.id_at(row), self.message_at(row)) else {
             return Vec::new();
@@ -53,6 +56,9 @@ impl ChatBuffer {
             return vec![FocusItem::LoadMore { message }];
         }
         let mut out = Vec::new();
+        if self.reply(message).is_some() {
+            out.push(FocusItem::Reply { message });
+        }
         // The gutter a grouped row doesn't draw can't be clicked either.
         let shown = !msg.flags.contains(MessageFlags::GROUPED)
             && (msg.gutter.as_ref().is_some_and(|g| !g.text.is_empty())

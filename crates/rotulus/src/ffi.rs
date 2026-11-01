@@ -18,7 +18,7 @@ use gtk4::glib::translate::{IntoGlib, IntoGlibPtr, ToGlibPtr};
 use gtk4::prelude::*;
 use rotulus_layout::{
     Attrs, Block, ColorRef, LoadMoreDirection, Message, MessageFlags, MessageId, MessageKind,
-    ParsedText, Span, Style,
+    ParsedText, Reply, Span, Style,
 };
 use std::ffi::{c_char, c_int, c_uint, c_void, CStr};
 
@@ -788,6 +788,89 @@ pub unsafe extern "C" fn rotulus_view_get_last(w: CGtkWidget) -> *mut c_void {
 #[no_mangle]
 pub unsafe extern "C" fn rotulus_view_set_marker(w: CGtkWidget, mark: *mut c_void) {
     with_view!(w, v, v.set_marker(ptr_to_mark(mark)))
+}
+
+// ---- replies --------------------------------------------------------
+
+/// # Safety
+/// `w` is a valid `RotulusView *`; `mark` is a mark or NULL; `nick` and
+/// `excerpt` are NULL or NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_set_reply(
+    w: CGtkWidget,
+    mark: *mut c_void,
+    nick: *const c_char,
+    color: c_int,
+    excerpt: *const c_char,
+) -> c_int {
+    let color = if color < 0 {
+        ColorRef::Default
+    } else {
+        ColorRef::Palette(color.min(255) as u8)
+    };
+    set_quote(w, mark, nick, color, excerpt)
+}
+
+/// # Safety
+/// As [`rotulus_view_set_reply`].
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_set_reply_rgb(
+    w: CGtkWidget,
+    mark: *mut c_void,
+    nick: *const c_char,
+    rgb: u32,
+    excerpt: *const c_char,
+) -> c_int {
+    set_quote(w, mark, nick, ColorRef::Rgb(rgb & 0xff_ffff), excerpt)
+}
+
+/// # Safety
+/// As [`rotulus_view_set_reply`].
+unsafe fn set_quote(
+    w: CGtkWidget,
+    mark: *mut c_void,
+    nick: *const c_char,
+    color: ColorRef,
+    excerpt: *const c_char,
+) -> c_int {
+    // A quote of nobody saying nothing is no quote.
+    if nick.is_null() && excerpt.is_null() {
+        return 0;
+    }
+    let reply = Reply::Quote {
+        nick: cstr(nick),
+        color,
+        excerpt: cstr(excerpt),
+    };
+    match (view_of(w), ptr_to_mark(mark)) {
+        (Some(v), Some(id)) => c_int::from(v.set_reply(id, Some(reply))),
+        _ => 0,
+    }
+}
+
+/// # Safety
+/// `w` is a valid `RotulusView *`; `mark` is a mark or NULL; `text` is
+/// NULL or NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_set_reply_unavailable(
+    w: CGtkWidget,
+    mark: *mut c_void,
+    text: *const c_char,
+) -> c_int {
+    match (view_of(w), ptr_to_mark(mark)) {
+        (Some(v), Some(id)) => c_int::from(v.set_reply(id, Some(Reply::Unavailable(cstr(text))))),
+        _ => 0,
+    }
+}
+
+/// # Safety
+/// `w` is a valid `RotulusView *`; `mark` is a mark or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_clear_reply(w: CGtkWidget, mark: *mut c_void) -> c_int {
+    match (view_of(w), ptr_to_mark(mark)) {
+        (Some(v), Some(id)) => c_int::from(v.set_reply(id, None)),
+        _ => 0,
+    }
 }
 
 // ---- inline media ---------------------------------------------------

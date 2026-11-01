@@ -80,4 +80,4 @@ pub(crate) fn ensure_gtk_init() {
 mod tests;
 
 pub use measure::PangoMeasure;
-pub use view::{AvatarFunc, LoadDirection, RotulusView};
+pub use view::{AvatarFunc, LoadDirection, RotulusView, RowMark};

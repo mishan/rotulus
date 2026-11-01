@@ -70,7 +70,8 @@ Three things about the C ABI exist for the bindings:
 - **`RotulusMark` is a boxed type** whose copy returns the same mark and
   whose free does nothing. A mark is an id, not a pointer to anything, so
   there is nothing to copy; but GJS refuses to hold a pointer whose type
-  it can't copy.
+  it can't copy. The signals that name a row hand one over, which Rust
+  sees as a `RowMark`.
 - **The `capi` cargo feature** switches off gtk4-rs's check that Rust
   initialized GTK. A C program initializes GTK itself, so the check is
   redundant there, and the introspection scanner fails it outright: it
@@ -137,6 +138,9 @@ non-breaking-space sentinel. `rotulus-layout::message` carries:
 - **`MessageFlags`** — highlight, muted, action, outgoing, deleted, and
   grouped, which the buffer sets and recomputes from a row's neighbors
   rather than taking from the caller.
+
+A row can also carry a **`Reply`** header, which is deliberately not a
+`Block`; see "Replies" below.
 
 The image block deliberately holds no `GdkTexture`: the layout engine only
 needs the size, and a texture cannot cross into a GTK-free crate. The view
@@ -546,10 +550,12 @@ Drag-select, double-click word select, triple-click line select, and
 autocopy (copy to the primary selection and the clipboard on drag-end,
 the `autocopy` property; `copy-timestamps` prefixes each copied row with
 its timestamp). Ctrl+C copies the selection, and a right-click away from
-a link or nick offers Copy and Select All. Every change is reported by
-`selection-changed`, and `has-selection` notifies when it flips.
+a link or nick offers Copy and Select All when the application doesn't
+take it as `row-menu`. Every change is reported by `selection-changed`,
+and `has-selection` notifies when it flips.
 Selection across an image block contributes the block's alt text to the
-copied string rather than xtext's all-or-nothing behavior.
+copied string rather than xtext's all-or-nothing behavior. A reply
+header contributes nothing, and search doesn't look in it.
 
 **Two controllers on one widget have no GTK-guaranteed ordering.**
 Double- and triple-click were broken on arrival: the multi-click handler
@@ -631,13 +637,13 @@ survives the jump. The same keys scroll when the view itself has focus.
 The view is focusable, and Tab is how someone without a pointer reaches
 what a click reaches. Its stops are the view as a whole, where the
 scrolling keys work and a screen reader reads the log, and then each
-thing on screen a click does something to — a speaker's name or avatar,
-a link, a load-more row, an image — in reading order. Tab from outside
-lands on the view, and Shift+Tab from outside on the last item on
-screen. Past the last item on screen, or back past the view, focus moves
-on to the neighboring widget, so it never traps the keyboard or walks a
-long scrollback item by item; scroll, and the next Tab starts from what
-is on screen.
+thing on screen a click does something to — a reply header, a speaker's
+name or avatar, a link, a load-more row, an image — in reading order.
+Tab from outside lands on the view, and Shift+Tab from outside on the
+last item on screen. Past the last item on screen, or back past the
+view, focus moves on to the neighboring widget, so it never traps the
+keyboard or walks a long scrollback item by item; scroll, and the next
+Tab starts from what is on screen.
 `rotulus-layout` decides the items and their order (`FocusItem`,
 `ChatBuffer::step_focus`), tested headless.
 
@@ -766,6 +772,8 @@ Clicks reach the application as typed signals, never as a word to match:
 | `speaker-menu (key, x, y)` | secondary click on a nick or avatar | nothing |
 | `load-more (direction)` | click anywhere on a load-more row | nothing |
 | `media-activated (token)` | primary click on an image or its placeholder | nothing |
+| `reply-activated (mark)` | primary click on a reply header | nothing |
+| `row-menu (mark, x, y) → handled` | secondary click on a message, anywhere but a link, a nick, an avatar or the selection | the view pops its own Copy / Select All menu |
 | `selection-changed` | the selection is made, extended or cleared | — |
 
 They replaced xtext's `word-click`, which handed every click over as the
@@ -777,6 +785,18 @@ media embedded `hxmedia:N` in the placeholder to be parsed back out.
 None of that is needed with typed signals. GtkHx, for example, handles
 `link-activated` to connect when a `hotline://` link is clicked and lets
 every other scheme fall through to the desktop.
+
+A signal hands over what the application gave the view for the thing
+clicked: a link's address, a speaker's key, an image's token. A reply
+header and a row are given by mark, so their signals hand back a
+`RotulusMark`, the handle `append` returned; the application already
+knows what the row replies to, having said so, and a key of the view's
+own would be a second identity for it to keep in step with the mark. A
+row's menu is where an application offers Reply or React; the view's
+Copy and Select All remain for one that doesn't handle it, and for a
+right-click on the selection, which is about the selection. Load-more and
+divider rows are the view's own, and have no row menu. The Menu key
+opens a row's menu from a focused reply header or image.
 
 A primary click on a link opens it, as it does everywhere else on the
 desktop — unless the view's `activate-links` property is off, which an
@@ -872,6 +892,44 @@ its place: what an edit, a redaction or a streamed reply growing a token
 at a time needs. The scroll anchor absorbs any change in height. A search
 or a selection is dropped, since it would point at different bytes.
 
+### Replies
+
+`rotulus_view_set_reply` gives a row a header above its body: a bar,
+the quoted author's nick in a palette color, and a plain-text excerpt
+of what they wrote, cut to one line with an ellipsis; the nick takes at
+most about half the line, so some of what they said shows.
+`rotulus_view_set_reply_rgb` takes the nick's color as RGB instead, for
+an application whose people have colors of their own, as a run's
+`ROTULUS_ATTR_RGB` gives one. `rotulus_view_set_reply_unavailable` puts
+the application's words in place of the quote ("Message deleted"), and
+`rotulus_view_clear_reply` takes the header away; from Rust,
+`RotulusView::set_reply` takes a `Reply` or `None`. A nick and an
+excerpt both NULL are refused, as no quote at all. Line and paragraph
+breaks in either text become spaces, and each is kept to its first few
+hundred characters, more than a line shows, so a whole message passed
+as an excerpt is never shaped or read out in full. Setting the header a
+row already has does nothing, so an application may resend it freely.
+
+The header belongs to the row, not to its content. A reply usually
+arrives before the message it quotes can be shown, so the application
+sets the header by mark when the quote is fetched — a height change the
+scroll anchor absorbs, as an image's decode is — without sending the row
+again, and a replace (an edit) keeps it. That is why it isn't a `Block`:
+blocks are what the person wrote, which a replace swaps and a reader
+selects and copies, while the header is the application's account of
+another message, so copying a reply copies what was written in it.
+Headers live beside the rows in the buffer rather than in each one,
+since most rows have none.
+
+The header takes the row's first line, over the body column, and the
+gutter, the avatar and the timestamp move down beside the body, so a
+nick stays next to what its owner wrote. In one column it starts where
+the nick does. A row with a header starts a group of its own, so its
+quote isn't read as part of the message above. A click on it is
+`reply-activated`; a click beside it is nothing, rather than the nick
+under it. Keyboard focus on a header that is taken away moves on to the
+next thing on its row.
+
 ### Accessibility
 
 The view's accessible role is `log`. Built against GTK 4.14 or newer (the
@@ -885,7 +943,10 @@ draws it, since `<al>` is spoken as "less than al greater than"; a row
 with no speaker reads its gutter. A link whose label isn't its address
 reads as both, `label (address)`, because a listener can't hover it to
 see where it goes. GTK 4 has no hypertext interface for marking links in
-an accessible text, so that is the only way an address gets across.
+an accessible text, so that is the only way an address gets across. A
+reply header reads after the speaker and before what they said, which
+starts a line of its own: "bo: replying to al: see you there", then the
+reply.
 
 Words, lines and rows are reported the way GTK's own text widgets report
 them, each running to where the next starts, so a reader stepping through
@@ -1073,6 +1134,23 @@ The accessible text reports each append as an insertion, but the view does
 not call `gtk_accessible_announce` for it. Whether a screen reader should
 speak every new message, and how politely, is worth deciding with someone
 who uses one.
+
+### The row menu from the keyboard
+
+The Menu key opens a row's menu from a focused reply header or image,
+but not from a speaker or a link, which have menus of
+their own, so most messages can't be given `row-menu` from the keyboard.
+Giving each row a focus stop of its own would add one per message to
+the Tab order, and is worth deciding with someone who navigates that
+way.
+
+### The reply header in the accessible text
+
+A header is read in its row's accessible text, but it isn't one of the
+row's sources, so a range in it maps to the row's nick: a screen
+reader's highlight for the header lands on the nick line below it.
+Giving it a source of its own would take a `LineSource` for it through
+selection, search and hit-testing, which deliberately ignore it.
 
 ### Animated media from a binding
 

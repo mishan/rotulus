@@ -12,11 +12,14 @@
 use crate::anchor::{AnchorResolver, Gravity, ScrollAnchor};
 use crate::index::HeightIndex;
 use crate::measure::TextMeasure;
-use crate::message::{Block, Message, MessageFlags, MessageId};
+use crate::message::{Block, Message, MessageFlags, MessageId, Reply};
 use crate::select::{Caret, RowSelection, Selection};
 use crate::span::Style;
 use crate::wrap::LineSource;
-use crate::wrap::{estimate_height, layout_message, LayoutCache, LayoutGeneration, LayoutParams};
+use crate::wrap::{
+    estimate_height, estimate_row_height, layout_row, LayoutCache, LayoutGeneration,
+};
+use crate::wrap::{LayoutParams, ReplyBox, ELLIPSIS, REPLY_TEXT_CAP};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
@@ -40,6 +43,16 @@ struct Row {
     /// every row in the scrollback would reserve room for a layout it will
     /// most likely never get.
     layout: Option<Box<LayoutCache>>,
+}
+
+/// What [`ChatBuffer::set_reply`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplyChange {
+    /// The row is gone; nothing was set.
+    Gone,
+    /// The row already had that header.
+    Unchanged,
+    Changed,
 }
 
 /// A scrollable list of laid-out messages.
@@ -79,6 +92,9 @@ pub struct ChatBuffer {
     /// is checked against its row before use, so a change these don't
     /// follow just falls back to the rebuild.
     hints: [Option<(MessageId, usize)>; 2],
+    /// Reply headers, by row. Beside the rows rather than in them, since
+    /// few rows have one and a field would cost every row its size.
+    replies: HashMap<MessageId, Reply>,
 
     params: LayoutParams,
     generation: LayoutGeneration,
@@ -123,6 +139,7 @@ impl ChatBuffer {
             pos_base: 0,
             pos_dirty: false,
             hints: [None; 2],
+            replies: HashMap::new(),
             params,
             generation,
             anchor: ScrollAnchor::bottom(),
@@ -305,6 +322,7 @@ impl ChatBuffer {
             self.history_rows -= 1;
         }
         self.rows.remove(row);
+        self.replies.remove(&id);
         self.index.remove(row);
         self.pos_dirty = true;
         self.forget_hint(row);
@@ -331,7 +349,7 @@ impl ChatBuffer {
         let Some(row) = self.row_of(id) else {
             return false;
         };
-        let h = estimate_height(&msg, &self.layout_params(), measure);
+        let h = estimate_row_height(&msg, self.replies.get(&id), &self.layout_params(), measure);
         let was = self.rows[row].msg.kind.is_history();
         let now = msg.kind.is_history();
         self.rows[row].msg = msg;
@@ -386,11 +404,78 @@ impl ChatBuffer {
         if !hit {
             return false;
         }
-        self.rows[row].layout = None;
-        let params = self.layout_params();
-        let h = estimate_height(&self.rows[row].msg, &params, measure);
-        self.index.set_height(row, h, false);
+        self.estimate_again(row, measure);
         true
+    }
+
+    /// Set or clear the reply header of the row `id` names.
+    ///
+    /// Control characters and line and paragraph separators in its texts
+    /// become spaces, since the header is one line however the original
+    /// was written, and each text is cut at [`REPLY_TEXT_CAP`] characters.
+    /// A row with a header starts a group of its own, so its quote isn't
+    /// read as part of the message above.
+    pub fn set_reply(
+        &mut self,
+        id: MessageId,
+        reply: Option<Reply>,
+        measure: &dyn TextMeasure,
+    ) -> ReplyChange {
+        let Some(row) = self.locate(id) else {
+            return ReplyChange::Gone;
+        };
+        let one_line = |t: String| {
+            let mut t: String = t
+                .chars()
+                .map(|c| match c {
+                    c if c.is_control() => ' ',
+                    '\u{2028}' | '\u{2029}' => ' ',
+                    c => c,
+                })
+                .collect();
+            if let Some((cut, _)) = t.char_indices().nth(REPLY_TEXT_CAP) {
+                t.truncate(cut);
+                t.push_str(ELLIPSIS);
+            }
+            t
+        };
+        let reply = reply.map(|r| match r {
+            Reply::Quote {
+                nick,
+                color,
+                excerpt,
+            } => Reply::Quote {
+                nick: one_line(nick),
+                color,
+                excerpt: one_line(excerpt),
+            },
+            Reply::Unavailable(t) => Reply::Unavailable(one_line(t)),
+        });
+        // Setting what is there already keeps the row's measured height.
+        if self.replies.get(&id) == reply.as_ref() {
+            return ReplyChange::Unchanged;
+        }
+        match reply {
+            Some(r) => self.replies.insert(id, r),
+            None => self.replies.remove(&id),
+        };
+        self.estimate_again(row, measure);
+        self.regroup_rows(row..row + 1, measure);
+        ReplyChange::Changed
+    }
+
+    /// The reply header of the row `id` names, if it has one.
+    pub fn reply(&self, id: MessageId) -> Option<&Reply> {
+        self.replies.get(&id)
+    }
+
+    /// Drop `row`'s layout and estimate its height afresh.
+    fn estimate_again(&mut self, row: usize, measure: &dyn TextMeasure) {
+        let params = self.layout_params();
+        let r = &mut self.rows[row];
+        r.layout = None;
+        let h = estimate_row_height(&r.msg, self.replies.get(&r.id), &params, measure);
+        self.index.set_height(row, h, false);
     }
 
     /// Find the row carrying an image block with `token`.
@@ -413,6 +498,7 @@ impl ChatBuffer {
         self.pos_base = 0;
         self.pos_dirty = false;
         self.hints = [None; 2];
+        self.replies.clear();
         self.history_rows = 0;
         self.anchor = ScrollAnchor::bottom();
         self.reset_indent();
@@ -448,6 +534,7 @@ impl ChatBuffer {
                     if !self.pos_dirty {
                         self.pos.remove(&row.id);
                     }
+                    self.replies.remove(&row.id);
                 }
             }
             self.index.drain_front(front);
@@ -542,8 +629,8 @@ impl ChatBuffer {
     fn regroup_rows(&mut self, rows: std::ops::Range<usize>, measure: &dyn TextMeasure) {
         for i in rows.start..rows.end.min(self.rows.len()) {
             let want = {
-                let msg = &self.rows[i].msg;
-                self.groups_with_previous(msg, i)
+                let r = &self.rows[i];
+                self.groups_with_previous(&r.msg, i) && !self.replies.contains_key(&r.id)
             };
             let had = self.rows[i].msg.flags.contains(MessageFlags::GROUPED);
             if want == had {
@@ -565,10 +652,7 @@ impl ChatBuffer {
             // until enough rows happen to be laid out for real. That is
             // the kind of bug that looks like "scrolling stops early
             // sometimes" and is miserable to trace back here.
-            self.rows[i].layout = None;
-            let params = self.layout_params();
-            let h = estimate_height(&self.rows[i].msg, &params, measure);
-            self.index.set_height(i, h, false);
+            self.estimate_again(i, measure);
         }
     }
 
@@ -698,7 +782,8 @@ impl ChatBuffer {
                 return l.height;
             }
         }
-        let layout = layout_message(&self.rows[row].msg, &params, gen, measure);
+        let reply = self.replies.get(&self.rows[row].id);
+        let layout = layout_row(&self.rows[row].msg, reply, &params, gen, measure);
 
         // A wider nick than any seen so far widens the shared gutter, so
         // every *other* row's layout is stale. Rare — it settles within
@@ -716,7 +801,7 @@ impl ChatBuffer {
             }
             self.index.invalidate_all_measurements();
             params.indent_width = self.indent_width;
-            let layout = layout_message(&self.rows[row].msg, &params, gen, measure);
+            let layout = layout_row(&self.rows[row].msg, reply, &params, gen, measure);
             let height = layout.height;
             self.rows[row].layout = Some(Box::new(layout));
             self.index.set_height(row, height, true);
@@ -1025,6 +1110,23 @@ impl ChatBuffer {
         } else {
             None
         }
+    }
+
+    /// The row whose reply header's line holds content point `(x, y)`,
+    /// and whether the point is on the header rather than beside it.
+    ///
+    /// Beside it counts too, because the caret hit-test answers a point
+    /// above a row's lines with its first line, the gutter: the empty band
+    /// around a header would otherwise be the nick.
+    pub fn reply_at(&mut self, x: i32, y: u64) -> Option<(MessageId, bool)> {
+        let hit = self.index.locate(y)?;
+        let row = self.rows.get(hit.row)?;
+        let r: ReplyBox = **row.layout.as_ref()?.reply.as_ref()?;
+        if hit.offset < r.y || hit.offset >= r.y + r.height {
+            return None;
+        }
+        let on = x >= r.x as i32 && x < (r.x + r.width) as i32;
+        Some((row.id, on))
     }
 
     /// A selection covering the whole buffer, or `None` when empty.

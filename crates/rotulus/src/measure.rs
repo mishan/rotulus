@@ -249,6 +249,19 @@ impl TextMeasure for PangoMeasure {
             // Degrade to one character instead.
             None => return self.min_progress(text, style),
         };
+        // An x on a right-to-left run is a visual position, and the index
+        // it gives isn't the end of the logical prefix that fits: a Hebrew
+        // line kept a few characters. Those lines measure prefixes instead.
+        if line
+            .runs()
+            .iter()
+            .any(|r| r.item().analysis().level() % 2 == 1)
+        {
+            return match rotulus_layout::fit_prefix_by_search(self, text, style, max_width) {
+                (0, _) => self.min_progress(text, style),
+                fit => fit,
+            };
+        }
         let hit = line.x_to_index((max_width as i32) * pango::SCALE);
         // `is_inside` false means the x fell past the end of the line, so
         // everything fits up to that point. Otherwise take the reported
