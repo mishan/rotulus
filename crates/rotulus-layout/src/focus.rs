@@ -2,7 +2,7 @@
 //!
 //! The view draws a transcript, not widgets, so Tab has nothing of GTK's
 //! to move between. These are the things a click does something to — a
-//! reply header, a speaker, a link, a load-more row, an image — in reading
+//! speaker, a reply header, a link, a load-more row, an image — in reading
 //! order, so that the keyboard reaches each of them, in the order they are
 //! read, and nothing else.
 
@@ -45,7 +45,7 @@ impl FocusItem {
 }
 
 impl ChatBuffer {
-    /// A row's items, in reading order: the reply header, the speaker,
+    /// A row's items, in reading order: the speaker, the reply header,
     /// then each block's links or image in turn. A load-more row is one
     /// item, whatever it says.
     pub fn focus_items(&self, row: usize) -> Vec<FocusItem> {
@@ -56,15 +56,15 @@ impl ChatBuffer {
             return vec![FocusItem::LoadMore { message }];
         }
         let mut out = Vec::new();
-        if self.reply(message).is_some() {
-            out.push(FocusItem::Reply { message });
-        }
         // The gutter a grouped row doesn't draw can't be clicked either.
         let shown = !msg.flags.contains(MessageFlags::GROUPED)
             && (msg.gutter.as_ref().is_some_and(|g| !g.text.is_empty())
                 || self.params().avatar_size > 0);
         if shown && msg.speaker.as_ref().is_some_and(|s| s.key != 0) {
             out.push(FocusItem::Speaker { message });
+        }
+        if self.reply(message).is_some() {
+            out.push(FocusItem::Reply { message });
         }
         for (bi, b) in msg.blocks.iter().enumerate() {
             let parsed = match b {

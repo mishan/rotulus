@@ -285,7 +285,7 @@ fn a_click_lands_where_right_to_left_text_is_drawn() {
     let chars = |at: usize| s[..at].chars().count();
     let all = s.chars().count();
     let left = m.offset_at_x(s, plain, 2);
-    let right = m.offset_at_x(s, plain, full - 2);
+    let right = m.offset_at_x(s, plain, full as i32 - 2);
     assert!(s.is_char_boundary(left) && s.is_char_boundary(right));
     assert!(
         chars(left) + 2 >= all,
@@ -296,6 +296,12 @@ fn a_click_lands_where_right_to_left_text_is_drawn() {
         "the right edge is the start, got {right}"
     );
     let latin = "left to right";
+    // Left of the line is its end, after the last character; inside the
+    // leftmost glyph, the last character itself.
+    let last = s.char_indices().next_back().unwrap().0;
+    assert_eq!(m.offset_at_x(s, plain, -5), s.len());
+    assert_eq!(m.offset_at_x(s, plain, 1), last);
+    assert_eq!(m.offset_at_x(latin, plain, -5), 0);
     assert_eq!(m.offset_at_x(latin, plain, 1), 0);
     assert_eq!(m.offset_at_x(latin, plain, 10_000), latin.len());
 }
@@ -1381,8 +1387,20 @@ fn check_replies() {
     assert_eq!(
         view.hover_target_at(beside.0, beside.1),
         None,
-        "beside the header is not the nick below it"
+        "past the header is not the nick on its line"
     );
+    // Nor is the gap above the row, across its whole width.
+    let row_top = {
+        let mut buf = view.imp_ref().buffer.borrow_mut();
+        f64::from(crate::view::PAD_Y) + buf.index_mut().offset_of(1) as f64
+    };
+    for x in [f64::from(crate::view::PAD_X) + 2.0, header.0, 390.0] {
+        assert_eq!(
+            view.hover_target_at(x, row_top + 1.0),
+            None,
+            "the gap at {x}"
+        );
+    }
     view.activate_at(header.0, header.1);
     view.activate_at(beside.0, beside.1);
     for (x, y) in [header, body, beside] {
@@ -1405,8 +1423,8 @@ fn check_replies() {
         ]
     );
 
-    // From the keyboard: the header is its row's first stop, Enter is a
-    // click on it, and the Menu key opens its row's menu.
+    // From the keyboard: the header is its row's stop after the speaker,
+    // Enter is a click on it, and the Menu key opens its row's menu.
     assert!(view.child_focus(gtk4::DirectionType::TabForward));
     while view
         .imp_ref()
@@ -1418,6 +1436,11 @@ fn check_replies() {
     {
         assert!(view.child_focus(gtk4::DirectionType::TabForward));
     }
+    assert_eq!(
+        *view.imp_ref().focus_item.borrow(),
+        Some(FocusItem::Speaker { message: id })
+    );
+    assert!(view.child_focus(gtk4::DirectionType::TabForward));
     let item = view.imp_ref().focus_item.borrow().clone().unwrap();
     assert_eq!(item, FocusItem::Reply { message: id });
     assert!(!view.item_boxes(&item).is_empty(), "it has a ring to draw");
@@ -1463,13 +1486,24 @@ fn check_replies() {
 
     // The header changes and goes without the rest of the row.
     assert!(view.set_reply(id, Some(Reply::Unavailable("deleted".into()))));
-    let _holder = laid_out(&view);
-    assert!(find_point(&view, 1, |t| *t == HoverTarget::Reply { message: id }).is_some());
-    assert!(view.set_reply(id, None));
     assert_eq!(
         *view.imp_ref().focus_item.borrow(),
-        Some(FocusItem::Speaker { message: id }),
-        "focus on a header that went moves on along its row"
+        Some(FocusItem::Reply { message: id }),
+        "a header that changes keeps focus"
+    );
+    let _holder = laid_out(&view);
+    assert!(find_point(&view, 1, |t| *t == HoverTarget::Reply { message: id }).is_some());
+    assert!(view.replace(id, message_row(8, "bo", "agreed, see https://example.com")));
+    view.imp_ref()
+        .focus_item
+        .replace(Some(FocusItem::Reply { message: id }));
+    assert!(view.set_reply(id, None));
+    assert!(
+        matches!(
+            *view.imp_ref().focus_item.borrow(),
+            Some(FocusItem::Link { message, .. }) if message == id
+        ),
+        "focus on a header that went moves on to what came after it"
     );
     let _holder = laid_out(&view);
     assert!(find_point(&view, 1, |t| matches!(t, HoverTarget::Reply { .. })).is_none());
@@ -1560,6 +1594,46 @@ fn check_replies() {
         [format!("row {}", x.0), format!("row {}", x.0)],
         "off the glyph either side: the row's"
     );
+
+    // A decoded image paints no selection over itself, so a right-click
+    // on a selected one is its row's.
+    let picture = view.append(rotulus_layout::Message {
+        kind: rotulus_layout::MessageKind::Live,
+        timestamp: 1_000,
+        speaker: None,
+        gutter: None,
+        blocks: vec![rotulus_layout::Block::Image {
+            token: 5,
+            size: None,
+            alt: "[a picture]".into(),
+        }]
+        .into(),
+        flags: rotulus_layout::MessageFlags::NONE,
+    });
+    let pixels = gtk4::glib::Bytes::from_owned(vec![128u8; 60 * 40 * 4]);
+    let texture =
+        gtk4::gdk::MemoryTexture::new(60, 40, gtk4::gdk::MemoryFormat::R8g8b8a8, &pixels, 60 * 4);
+    view.set_media_frames(5, vec![(texture.upcast(), 0)]);
+    let _holder = laid_out(&view);
+    let on_picture = {
+        let mut buf = view.imp_ref().buffer.borrow_mut();
+        let row = buf.row_of(picture).unwrap();
+        let top = buf.index_mut().offset_of(row) as f64;
+        let l = buf.layout_at(row).unwrap().lines[0].clone();
+        assert_eq!((l.width, l.height), (60, 40), "drawn as the picture");
+        (
+            f64::from(crate::view::PAD_X) + f64::from(l.x) + 4.0,
+            f64::from(crate::view::PAD_Y) + top + f64::from(l.y) + 4.0,
+        )
+    };
+    assert!(matches!(
+        view.hover_target_at(on_picture.0, on_picture.1),
+        Some(HoverTarget::Media { token: 5, .. })
+    ));
+    view.select_all();
+    seen.borrow_mut().clear();
+    view.open_menu_at(on_picture.0, on_picture.1);
+    assert_eq!(*seen.borrow(), [format!("row {}", picture.0)]);
 
     view.clear_selection();
     assert!(view.remove(id));

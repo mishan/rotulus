@@ -1475,18 +1475,32 @@ impl RotulusView {
     pub fn set_reply(&self, id: MessageId, reply: Option<Reply>) -> bool {
         use rotulus_layout::ReplyChange;
         let imp = self.imp_();
+        let header = FocusItem::Reply { message: id };
+        // Where focus on the header is in its row's stops, if it is there.
+        let at = (*imp.focus_item.borrow() == Some(header.clone())).then(|| {
+            let buf = imp.buffer.borrow();
+            buf.row_of(id)
+                .and_then(|r| buf.focus_items(r).iter().position(|i| *i == header))
+        });
         let change = {
             let m = imp.measure.borrow();
             imp.buffer.borrow_mut().set_reply(id, reply, &*m)
         };
         if change == ReplyChange::Changed {
-            // Focus on a header that went moves on to what is next on its
-            // row, rather than out of the transcript.
-            if *imp.focus_item.borrow() == Some(FocusItem::Reply { message: id }) {
+            // Focus on a header that went moves on to what came after it
+            // on its row, or what came before, rather than out of the
+            // transcript. One that changed is still at its place.
+            if let Some(Some(at)) = at {
                 let next = {
                     let buf = imp.buffer.borrow();
-                    let items = buf.row_of(id).map(|r| buf.focus_items(r));
-                    items.and_then(|i| i.into_iter().next())
+                    let items = buf
+                        .row_of(id)
+                        .map(|r| buf.focus_items(r))
+                        .unwrap_or_default();
+                    items
+                        .get(at)
+                        .or_else(|| at.checked_sub(1).and_then(|i| items.get(i)))
+                        .cloned()
                 };
                 imp.focus_item.replace(next);
             }
@@ -3674,7 +3688,8 @@ impl RotulusView {
     /// Whether a widget-space point is on the selection.
     ///
     /// Asked of the selection as painted, the band behind each line's
-    /// selected text, rather than of the caret the point maps to: a caret
+    /// selected text (and so never of a decoded image, which paints none),
+    /// rather than of the caret the point maps to: a caret
     /// is a boundary between characters, and the one inside a selected
     /// character's glyph may be the boundary after it.
     fn in_selection(&self, x: f64, y: f64) -> bool {
@@ -3702,6 +3717,13 @@ impl RotulusView {
         layout.lines.iter().any(|l| {
             if hit.offset < l.y || hit.offset >= l.y + l.height {
                 return false;
+            }
+            // A decoded image paints no selection over itself.
+            if let LineSource::Block(bi) = l.source {
+                if let Some(rotulus_layout::Block::Image { size: Some(_), .. }) = msg.blocks.get(bi)
+                {
+                    return false;
+                }
             }
             let Some(r) = buf.covered_range(hit.row, l.source, &covered) else {
                 return false;

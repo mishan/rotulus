@@ -12,7 +12,7 @@
 use crate::anchor::{AnchorResolver, Gravity, ScrollAnchor};
 use crate::index::HeightIndex;
 use crate::measure::TextMeasure;
-use crate::message::{Block, Message, MessageFlags, MessageId, Reply};
+use crate::message::{Block, Message, MessageFlags, MessageId, MessageKind, Reply};
 use crate::select::{Caret, RowSelection, Selection};
 use crate::span::Style;
 use crate::wrap::LineSource;
@@ -349,6 +349,10 @@ impl ChatBuffer {
         let Some(row) = self.row_of(id) else {
             return false;
         };
+        // A load-more row takes no reply, so it drops the one it had.
+        if let MessageKind::LoadMore(_) = msg.kind {
+            self.replies.remove(&id);
+        }
         let h = estimate_row_height(&msg, self.replies.get(&id), &self.layout_params(), measure);
         let was = self.rows[row].msg.kind.is_history();
         let now = msg.kind.is_history();
@@ -408,7 +412,9 @@ impl ChatBuffer {
         true
     }
 
-    /// Set or clear the reply header of the row `id` names.
+    /// Set or clear the reply header of the row `id` names. A load-more
+    /// row takes none, as [`ReplyChange::Gone`]: it is a button, not a
+    /// message.
     ///
     /// Control characters and line and paragraph separators in its texts
     /// become spaces, since the header is one line however the original
@@ -424,6 +430,9 @@ impl ChatBuffer {
         let Some(row) = self.locate(id) else {
             return ReplyChange::Gone;
         };
+        if let MessageKind::LoadMore(_) = self.rows[row].msg.kind {
+            return ReplyChange::Gone;
+        }
         let one_line = |t: String| {
             // Only what is kept is copied, so a short header holds no more
             // than it shows, whatever it was cut from.
@@ -1126,6 +1135,10 @@ impl ChatBuffer {
         let hit = self.index.locate(y)?;
         let row = self.rows.get(hit.row)?;
         let r: ReplyBox = **row.layout.as_ref()?.reply.as_ref()?;
+        // The gap above the row is nothing, not the nick under it.
+        if hit.offset < crate::wrap::reply_gap(r.height) {
+            return Some((row.id, false));
+        }
         // Left of it, on its line, is the nick.
         if hit.offset < r.y || hit.offset >= r.y + r.height || x < r.x as i32 {
             return None;
@@ -1319,13 +1332,8 @@ impl ChatBuffer {
         // line start selects from its beginning; right of the end
         // selects through it, which is what makes dragging past the end
         // of a short line feel right.
-        let rel = x - line_x;
-        let offset = if rel <= 0 {
-            range.start
-        } else {
-            let at = measure.offset_at_x(slice, Style::default(), rel as u32);
-            (range.start + at).min(range.end)
-        };
+        let at = measure.offset_at_x(slice, Style::default(), x - line_x);
+        let offset = (range.start + at).min(range.end);
 
         Some(Caret {
             message: id,

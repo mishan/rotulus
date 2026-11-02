@@ -100,7 +100,7 @@ impl LayoutCache {
 }
 
 /// The space above a row that replies, for a line `line_h` tall.
-fn reply_gap(line_h: u32) -> u32 {
+pub(crate) fn reply_gap(line_h: u32) -> u32 {
     (line_h / 4).max(1)
 }
 
@@ -309,6 +309,7 @@ pub fn layout_row(
     // column of their own. Zero in two-column mode, where both live in
     // the gutter column.
     let mut lead = 0u32;
+    let mut gutter_end = 0u32;
     let gutter = msg
         .gutter
         .as_ref()
@@ -331,6 +332,7 @@ pub fn layout_row(
             x: gx,
             width: gw,
         });
+        gutter_end = gx + gw + params.gutter_gap;
         if !params.indent {
             lead = gx + gw + metrics.space_width;
         }
@@ -357,14 +359,25 @@ pub fn layout_row(
     // That line is the row's own, so the quote reads as the start of this
     // message rather than the end of the one above; the body starts on
     // the line after it.
+    //
+    // A nick too long for its column runs into the body's, and the header
+    // starts past it. In one column, a nick that leaves the header too
+    // little of its line puts the header on the next, from the edge, as
+    // the body would wrap.
     let mut reply = reply.map(|r| {
-        let x = if params.indent { body_x } else { beside };
+        let (x, hy) = if params.indent {
+            (body_x.max(gutter_end), top)
+        } else if params.width.saturating_sub(beside) < 4 * line_h {
+            (0, top + line_h)
+        } else {
+            (beside, top)
+        };
         let mut b = layout_reply(r, x, params.width.saturating_sub(x), line_h, measure);
-        b.y = top;
+        b.y = hy;
         Box::new(b)
     });
-    if reply.is_some() {
-        y = top + line_h;
+    if let Some(r) = &reply {
+        y = r.y + line_h;
         lead = 0;
     }
 
@@ -607,7 +620,8 @@ fn layout_reply(r: &Reply, x: u32, width: u32, line_h: u32, measure: &dyn TextMe
     ReplyBox {
         x,
         y: 0,
-        width: (end - x).min(width),
+        // At least a pixel, so focus on it has somewhere to be.
+        width: (end - x).min(width).max(1),
         height: line_h,
         nick,
         text,
@@ -978,7 +992,10 @@ pub fn estimate_row_height(
     measure: &dyn TextMeasure,
 ) -> u32 {
     let line_h = measure.metrics().line_height.max(1);
-    let header = reply.map_or(0, |_| line_h + reply_gap(line_h));
+    // In one column a long nick can put the header on a line of its own,
+    // which the estimator, measuring no nick, has to assume.
+    let lines = if params.indent { 1 } else { 2 };
+    let header = reply.map_or(0, |_| lines * line_h + reply_gap(line_h));
     header + estimate_height(msg, params, measure)
 }
 

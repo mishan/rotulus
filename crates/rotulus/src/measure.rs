@@ -232,7 +232,7 @@ impl TextMeasure for PangoMeasure {
 
     /// Pango's own answer, so a click lands where a right-to-left run
     /// draws its characters, not where its logical prefix would end.
-    fn offset_at_x(&self, text: &str, style: Style, x: u32) -> usize {
+    fn offset_at_x(&self, text: &str, style: Style, x: i32) -> usize {
         self.offset_at(text, style, x)
     }
 
@@ -291,9 +291,9 @@ impl TextMeasure for PangoMeasure {
 }
 
 impl PangoMeasure {
-    /// Where Pango draws the point: the character under `x`, or the end of
-    /// the line past its far side, whichever way the text runs.
-    fn offset_at(&self, text: &str, style: Style, x: u32) -> usize {
+    /// Where Pango draws the point: the character under `x`, or past
+    /// either side of the line, the end there, whichever way the text runs.
+    fn offset_at(&self, text: &str, style: Style, x: i32) -> usize {
         if text.is_empty() {
             return 0;
         }
@@ -301,7 +301,7 @@ impl PangoMeasure {
         let Some(line) = layout.line_readonly(0) else {
             return 0;
         };
-        let hit = line.x_to_index((x as i32) * pango::SCALE);
+        let hit = line.x_to_index(x.saturating_mul(pango::SCALE));
         let mut idx = (hit.index().max(0) as usize).min(text.len());
         while idx > 0 && !text.is_char_boundary(idx) {
             idx -= 1;

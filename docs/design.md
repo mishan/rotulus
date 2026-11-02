@@ -555,7 +555,9 @@ take it as `row-menu`. Every change is reported by `selection-changed`,
 and `has-selection` notifies when it flips.
 Selection across an image block contributes the block's alt text to the
 copied string rather than xtext's all-or-nothing behavior. A reply
-header contributes nothing, and search doesn't look in it.
+header contributes nothing, and search doesn't look in it. A right-click
+on the selection as painted offers Copy; a decoded image paints none over
+itself, so a right-click on a selected one is its row's.
 
 **Two controllers on one widget have no GTK-guaranteed ordering.**
 Double- and triple-click were broken on arrival: the multi-click handler
@@ -637,8 +639,8 @@ survives the jump. The same keys scroll when the view itself has focus.
 The view is focusable, and Tab is how someone without a pointer reaches
 what a click reaches. Its stops are the view as a whole, where the
 scrolling keys work and a screen reader reads the log, and then each
-thing on screen a click does something to — a reply header, a speaker's
-name or avatar, a link, a load-more row, an image — in reading order.
+thing on screen a click does something to — a speaker's name or avatar,
+a reply header, a link, a load-more row, an image — in reading order.
 Tab from outside lands on the view, and Shift+Tab from outside on the
 last item on screen. Past the last item on screen, or back past the
 view, focus moves on to the neighboring widget, so it never traps the
@@ -924,7 +926,11 @@ since most rows have none.
 The header goes on the row's own first line, beside the timestamp, the
 nick and the avatar, in the body column (in one column, where the body
 would have begun), and the body starts on the line after it; a row that
-replies also starts a little apart from the one above. The first
+replies also starts a little apart from the one above, and that gap is
+nothing to a click. A nick too long for its column, which runs into the
+body's, pushes the header past it; in one column, a nick that leaves the
+header too little of its line puts the header on the next, from the
+edge, as the body wraps. The first
 version put the header on a line of its own above the nick, and read
 wrong: directly under the previous row's text and a line above its own
 nick, a quote looked like the end of the message above, or like its
@@ -932,8 +938,10 @@ author speaking. On the nick's line it can only be the start of this
 row. A row with a header starts a group of its own, so its nick is
 always drawn beside it. A click on it is `reply-activated`; a click past
 its end is nothing, rather than the nick the caret hit-test would find
-on that line. Keyboard focus on a header that is taken away moves on to
-the next thing on its row.
+on that line. In Tab order the header comes after the speaker, as it is
+drawn and read; focus on a header that is taken away moves on to what
+came after it on its row, or the speaker when nothing did. A load-more
+row takes no header, and a row replaced by one drops its own.
 
 ### Accessibility
 
@@ -1153,7 +1161,7 @@ way.
 
 A header is read in its row's accessible text, but it isn't one of the
 row's sources, so a range in it maps to the row's nick: a screen
-reader's highlight for the header lands on the nick line below it.
+reader's highlight for the header lands on the nick beside it.
 Giving it a source of its own would take a `LineSource` for it through
 selection, search and hit-testing, which deliberately ignore it.
 

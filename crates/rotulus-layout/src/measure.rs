@@ -90,8 +90,14 @@ pub trait TextMeasure {
     /// left-to-right text they agree, which is the default; on a
     /// right-to-left run the first characters are drawn at the right, and
     /// an implementation that shapes text answers from where they are.
-    fn offset_at_x(&self, text: &str, style: Style, x: u32) -> usize {
-        self.fit_prefix(text, style, x).0
+    ///
+    /// `x` may be negative, left of the text, which on left-to-right text
+    /// is its start.
+    fn offset_at_x(&self, text: &str, style: Style, x: i32) -> usize {
+        match u32::try_from(x) {
+            Ok(x) if x > 0 => self.fit_prefix(text, style, x).0,
+            _ => 0,
+        }
     }
 
     /// Rendered size of an image block, given its intrinsic size and the
