@@ -1476,30 +1476,34 @@ impl RotulusView {
         use rotulus_layout::ReplyChange;
         let imp = self.imp_();
         let header = FocusItem::Reply { message: id };
-        // Where focus on the header is in its row's stops, if it is there.
-        let at = (*imp.focus_item.borrow() == Some(header.clone())).then(|| {
-            let buf = imp.buffer.borrow();
+        let items = |buf: &rotulus_layout::ChatBuffer| {
             buf.row_of(id)
-                .and_then(|r| buf.focus_items(r).iter().position(|i| *i == header))
-        });
+                .map(|r| buf.focus_items(r))
+                .unwrap_or_default()
+        };
+        // The row's stops, when focus is on its header.
+        let before =
+            (*imp.focus_item.borrow() == Some(header.clone())).then(|| items(&imp.buffer.borrow()));
         let change = {
             let m = imp.measure.borrow();
             imp.buffer.borrow_mut().set_reply(id, reply, &*m)
         };
         if change == ReplyChange::Changed {
-            // Focus on a header that went moves on to what came after it
-            // on its row, or what came before, rather than out of the
-            // transcript. One that changed is still at its place.
-            if let Some(Some(at)) = at {
-                let next = {
-                    let buf = imp.buffer.borrow();
-                    let items = buf
-                        .row_of(id)
-                        .map(|r| buf.focus_items(r))
-                        .unwrap_or_default();
-                    items
-                        .get(at)
-                        .or_else(|| at.checked_sub(1).and_then(|i| items.get(i)))
+            // Focus on a header that went moves on to the first stop after
+            // it that is still there, or else to the row's first, rather
+            // than out of the transcript. Stops are found by what they are,
+            // not where they were: the row may have regrouped and lost its
+            // speaker. One that changed is still there.
+            if let Some(before) = before {
+                let after = items(&imp.buffer.borrow());
+                let next = if after.contains(&header) {
+                    Some(header)
+                } else {
+                    before
+                        .iter()
+                        .skip_while(|i| **i != header)
+                        .find(|i| after.contains(i))
+                        .or_else(|| after.first())
                         .cloned()
                 };
                 imp.focus_item.replace(next);
@@ -3520,9 +3524,22 @@ impl RotulusView {
         {
             let imp = self.imp_();
             let height = content_height(self.height());
-            let scroll = imp.buffer.borrow_mut().scroll_offset(height);
             let cx = (x as i32) - PAD_X;
-            let cy = ((y as i32) - PAD_Y).max(0) as u64 + scroll;
+            let cy = |buf: &mut ChatBuffer| {
+                ((y as i32) - PAD_Y).max(0) as u64 + buf.scroll_offset(height)
+            };
+            // The boxes below are the layout's, and a row changed since the
+            // last draw has none yet: lay it out, then find the point again,
+            // since that can move the rows.
+            let cy = {
+                let m = imp.measure.borrow();
+                let mut buf = imp.buffer.borrow_mut();
+                let at = cy(&mut buf);
+                if let Some(hit) = buf.index_mut().locate(at) {
+                    buf.ensure_layout(hit.row, &*m);
+                }
+                cy(&mut buf)
+            };
             // One borrow, released before anything else touches the
             // buffer. Chaining a borrow() inside an and_then() on a live
             // borrow_mut() is a RefCell panic the moment the pointer

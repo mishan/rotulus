@@ -1634,6 +1634,58 @@ fn check_replies() {
     seen.borrow_mut().clear();
     view.open_menu_at(on_picture.0, on_picture.1);
     assert_eq!(*seen.borrow(), [format!("row {}", picture.0)]);
+    view.clear_selection();
+
+    // A header set since the last draw is found at once: a right-click on
+    // it is its row's menu, not its speaker's.
+    let first = view.append(message_row(8, "bo", "one"));
+    let second = view.append(message_row(
+        8,
+        "bo",
+        "see https://a.example and https://b.example",
+    ));
+    let quote = || Reply::Quote {
+        nick: "al".into(),
+        color: ColorRef::Default,
+        excerpt: "hi".into(),
+    };
+    assert!(view.set_reply(second, Some(quote())));
+    let _holder = laid_out(&view);
+    let row = view.imp_ref().buffer.borrow().row_of(second).unwrap();
+    let on_header = find_point(&view, row, |t| *t == HoverTarget::Reply { message: second })
+        .expect("the header is hittable");
+    assert!(view.set_reply(second, Some(Reply::Unavailable("gone".into()))));
+    seen.borrow_mut().clear();
+    view.open_menu_at(on_header.0, on_header.1);
+    assert_eq!(
+        *seen.borrow(),
+        [format!("row {}", second.0)],
+        "before any draw"
+    );
+
+    // Its row grouped with the one above once its header goes, so the
+    // speaker it had is no stop any more: focus moves on to the first link,
+    // the stop that came after the header.
+    let _holder = laid_out(&view);
+    view.imp_ref()
+        .focus_item
+        .replace(Some(FocusItem::Reply { message: second }));
+    assert!(view.set_reply(second, None));
+    let buf = view.imp_ref().buffer.borrow();
+    assert!(buf
+        .message(second)
+        .unwrap()
+        .flags
+        .contains(rotulus_layout::MessageFlags::GROUPED));
+    let links: Vec<_> = buf.focus_items(buf.row_of(second).unwrap());
+    drop(buf);
+    assert_eq!(
+        view.imp_ref().focus_item.borrow().as_ref(),
+        links.first(),
+        "the first link, not the second"
+    );
+    assert!(matches!(links.first(), Some(FocusItem::Link { .. })));
+    assert!(view.remove(first) && view.remove(second));
 
     view.clear_selection();
     assert!(view.remove(id));
