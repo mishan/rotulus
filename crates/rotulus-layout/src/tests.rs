@@ -4468,3 +4468,30 @@ fn a_load_more_row_takes_no_reply() {
         "and is given none"
     );
 }
+
+#[test]
+fn a_header_alone_on_its_row_is_all_inside_it() {
+    // No nick and no body, at a width that puts the header on the second
+    // line: the row reaches past the header's bottom.
+    let m = FixedMeasure::new(8);
+    let msg = Message {
+        blocks: crate::message::Blocks::new(Vec::new()),
+        ..Message::system(ParsedText::plain(""))
+    };
+    let p = params(40);
+    let l = layout_row(
+        &msg,
+        Some(&quote("bo", "hi")),
+        &p,
+        LayoutGeneration::default(),
+        &m,
+    );
+    let r = l.reply.as_deref().unwrap();
+    assert_eq!(r.y, 20);
+    assert!(
+        l.height >= r.y + r.height,
+        "{} ends above the header",
+        l.height
+    );
+    assert!(estimate_row_height(&msg, Some(&quote("bo", "hi")), &p, &m) >= l.height);
+}

@@ -538,8 +538,10 @@ pub fn layout_row(
         }
     }
 
+    // At least a line, past whatever is already placed: a header alone
+    // may sit on the second.
     if lines.is_empty() {
-        y = top + line_h;
+        y = y.max(top + line_h);
     }
 
     // Centre the text against the icon when the icon is the taller of

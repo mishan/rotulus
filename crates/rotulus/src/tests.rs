@@ -1636,6 +1636,16 @@ fn check_replies() {
     assert_eq!(*seen.borrow(), [format!("row {}", picture.0)]);
     view.clear_selection();
 
+    // Below the last row is no row, though the caret clamps to it.
+    let below = {
+        let mut buf = view.imp_ref().buffer.borrow_mut();
+        f64::from(crate::view::PAD_Y) + buf.total_height() as f64 + 10.0
+    };
+    assert!(below < 300.0, "room below the rows");
+    seen.borrow_mut().clear();
+    view.open_menu_at(on_picture.0, below);
+    assert_eq!(*seen.borrow(), Vec::<String>::new(), "the view's own menu");
+
     // A header set since the last draw is found at once: a right-click on
     // it is its row's menu, not its speaker's.
     let first = view.append(message_row(8, "bo", "one"));
@@ -1685,6 +1695,18 @@ fn check_replies() {
         "the first link, not the second"
     );
     assert!(matches!(links.first(), Some(FocusItem::Link { .. })));
+    // So does focus on the speaker itself, which the regroup takes away.
+    assert!(view.set_reply(second, Some(quote())));
+    let _holder = laid_out(&view);
+    view.imp_ref()
+        .focus_item
+        .replace(Some(FocusItem::Speaker { message: second }));
+    assert!(view.set_reply(second, None));
+    assert_eq!(
+        view.imp_ref().focus_item.borrow().as_ref(),
+        links.first(),
+        "from a speaker that went, the first stop after it"
+    );
     assert!(view.remove(first) && view.remove(second));
 
     view.clear_selection();

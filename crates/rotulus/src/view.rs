@@ -1475,38 +1475,39 @@ impl RotulusView {
     pub fn set_reply(&self, id: MessageId, reply: Option<Reply>) -> bool {
         use rotulus_layout::ReplyChange;
         let imp = self.imp_();
-        let header = FocusItem::Reply { message: id };
         let items = |buf: &rotulus_layout::ChatBuffer| {
             buf.row_of(id)
                 .map(|r| buf.focus_items(r))
                 .unwrap_or_default()
         };
-        // The row's stops, when focus is on its header.
-        let before =
-            (*imp.focus_item.borrow() == Some(header.clone())).then(|| items(&imp.buffer.borrow()));
+        // The focused stop and the row's stops, when focus is on the row.
+        let focused = imp
+            .focus_item
+            .borrow()
+            .clone()
+            .filter(|i| i.message() == id);
+        let before = focused.map(|f| (f, items(&imp.buffer.borrow())));
         let change = {
             let m = imp.measure.borrow();
             imp.buffer.borrow_mut().set_reply(id, reply, &*m)
         };
         if change == ReplyChange::Changed {
-            // Focus on a header that went moves on to the first stop after
+            // A focused stop that went — the header, or the speaker of a row
+            // that regrouped without it — moves on to the first stop after
             // it that is still there, or else to the row's first, rather
             // than out of the transcript. Stops are found by what they are,
-            // not where they were: the row may have regrouped and lost its
-            // speaker. One that changed is still there.
-            if let Some(before) = before {
+            // not where they were.
+            if let Some((focused, before)) = before {
                 let after = items(&imp.buffer.borrow());
-                let next = if after.contains(&header) {
-                    Some(header)
-                } else {
-                    before
+                if !after.contains(&focused) {
+                    let next = before
                         .iter()
-                        .skip_while(|i| **i != header)
+                        .skip_while(|i| **i != focused)
                         .find(|i| after.contains(i))
                         .or_else(|| after.first())
-                        .cloned()
-                };
-                imp.focus_item.replace(next);
+                        .cloned();
+                    imp.focus_item.replace(next);
+                }
             }
             self.after_content_change();
             self.a11y_replaced(id);
@@ -3678,9 +3679,13 @@ impl RotulusView {
                 self.show_context_menu(x, y)
             }
             other => {
+                // A click is on the row under it, if any: the caret behind
+                // the target clamps a point below the last row to that row.
+                // The keyboard names its item's.
                 let row = match other {
+                    _ if at_pointer => self.row_at(y),
                     Some(t) => Some(t.message()),
-                    None => self.row_at(y),
+                    None => None,
                 };
                 // Paging and framing rows are the view's, not messages.
                 let row = row.filter(|id| {

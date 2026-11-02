@@ -939,10 +939,10 @@ row. A row with a header starts a group of its own, so its nick is
 always drawn beside it. A click on it is `reply-activated`; a click past
 its end is nothing, rather than the nick the caret hit-test would find
 on that line. In Tab order the header comes after the speaker, as it is
-drawn and read; focus on a header that is taken away moves on to the
-first stop after it that is still there, or the row's first when none
-is (without its header a row may group with the one above and lose its
-speaker). A load-more
+drawn and read. Focus on a header that is taken away, or on a speaker
+whose row then groups with the one above and stops drawing it, moves on
+to the first stop after it that is still there, or the row's first when
+none is. A load-more
 row takes no header, and a row replaced by one drops its own.
 
 ### Accessibility
