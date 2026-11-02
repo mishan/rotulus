@@ -3486,7 +3486,7 @@ impl RotulusView {
                 if button == gtk4::gdk::BUTTON_SECONDARY
                     || matches!(target, Some(HoverTarget::Link { .. }))
                 {
-                    this.open_menu(target, x, y);
+                    this.open_menu(target, x, y, true);
                 }
             });
             self.add_controller(click);
@@ -3618,13 +3618,16 @@ impl RotulusView {
     /// Act on a secondary click at a widget-space point.
     #[cfg(test)]
     pub(crate) fn open_menu_at(&self, x: f64, y: f64) {
-        self.open_menu(self.hover_target_at(x, y), x, y);
+        self.open_menu(self.hover_target_at(x, y), x, y, true);
     }
 
     /// The menu for `target`, as a secondary click on it opens: a
     /// person's menu over a nick, the link menu over a link, the row's
     /// anywhere else on one, and the view's own when nobody handles that.
-    fn open_menu(&self, target: Option<HoverTarget>, x: f64, y: f64) {
+    /// `at_pointer` when a click opened it at `(x, y)`; the keyboard opens
+    /// a focused item's menu from a point near it, which says nothing
+    /// about the selection.
+    fn open_menu(&self, target: Option<HoverTarget>, x: f64, y: f64, at_pointer: bool) {
         match target {
             Some(HoverTarget::Nick { key, .. }) => {
                 self.emit_by_name::<()>("speaker-menu", &[&key, &x, &y]);
@@ -3636,7 +3639,11 @@ impl RotulusView {
                 }
             }
             // A right-click on the selection is about it: Copy.
-            ref t if !matches!(t, Some(HoverTarget::Reply { .. })) && self.in_selection(x, y) => {
+            ref t
+                if at_pointer
+                    && !matches!(t, Some(HoverTarget::Reply { .. }))
+                    && self.in_selection(x, y) =>
+            {
                 self.show_context_menu(x, y)
             }
             other => {
@@ -3665,20 +3672,48 @@ impl RotulusView {
     }
 
     /// Whether a widget-space point is on the selection.
+    ///
+    /// Asked of the selection as painted, the band behind each line's
+    /// selected text, rather than of the caret the point maps to: a caret
+    /// is a boundary between characters, and the one inside a selected
+    /// character's glyph may be the boundary after it.
     fn in_selection(&self, x: f64, y: f64) -> bool {
-        let Some(sel) = *self.imp_().selection.borrow() else {
+        let imp = self.imp_();
+        let Some(sel) = *imp.selection.borrow() else {
             return false;
         };
-        let Some(c) = self.caret_at(x, y) else {
+        let height = content_height(self.height());
+        let m = imp.measure.borrow();
+        let mut buf = imp.buffer.borrow_mut();
+        let cy = ((y as i32) - PAD_Y).max(0) as u64 + buf.scroll_offset(height);
+        if cy >= buf.total_height() {
+            return false;
+        }
+        let Some(hit) = buf.index_mut().locate(cy) else {
             return false;
         };
-        let buf = self.imp_().buffer.borrow();
-        let Some(row) = buf.row_of(c.message) else {
+        buf.ensure_layout(hit.row, &*m);
+        let buf = &*buf;
+        let (Some(layout), Some(msg)) = (buf.layout_at(hit.row), buf.message_at(hit.row)) else {
             return false;
         };
-        let covered = buf.row_selection(row, &sel);
-        buf.covered_range(row, c.source, &covered)
-            .is_some_and(|r| r.contains(&c.offset))
+        let covered = buf.row_selection(hit.row, &sel);
+        let cx = x - f64::from(PAD_X);
+        layout.lines.iter().any(|l| {
+            if hit.offset < l.y || hit.offset >= l.y + l.height {
+                return false;
+            }
+            let Some(r) = buf.covered_range(hit.row, l.source, &covered) else {
+                return false;
+            };
+            let (a, b) = (r.start.max(l.range.start), r.end.min(l.range.end));
+            if a >= b {
+                return false;
+            }
+            let x0 = l.x + styled_width(&m, msg, l.source, l.range.start..a);
+            let x1 = x0 + styled_width(&m, msg, l.source, a..b);
+            (f64::from(x0)..f64::from(x1)).contains(&cx)
+        })
     }
 
     /// The row at widget-space height `y`, if there is one there.
@@ -4230,7 +4265,7 @@ impl RotulusView {
         match item {
             Some(item) => {
                 let (x, y) = self.item_point(&item);
-                self.open_menu(self.target_of(&item), x, y);
+                self.open_menu(self.target_of(&item), x, y, false);
             }
             // Focus on the view as a whole is on no row.
             None => self.show_context_menu(

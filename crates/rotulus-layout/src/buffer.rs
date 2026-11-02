@@ -425,8 +425,11 @@ impl ChatBuffer {
             return ReplyChange::Gone;
         };
         let one_line = |t: String| {
+            // Only what is kept is copied, so a short header holds no more
+            // than it shows, whatever it was cut from.
             let mut t: String = t
                 .chars()
+                .take(REPLY_TEXT_CAP + 1)
                 .map(|c| match c {
                     c if c.is_control() => ' ',
                     '\u{2028}' | '\u{2029}' => ' ',
@@ -1112,21 +1115,22 @@ impl ChatBuffer {
         }
     }
 
-    /// The row whose reply header's line holds content point `(x, y)`,
-    /// and whether the point is on the header rather than beside it.
+    /// The row whose reply header holds content point `(x, y)`, or whose
+    /// header's line holds it right of the header's start, and whether the
+    /// point is on the header rather than past its end.
     ///
-    /// Beside it counts too, because the caret hit-test answers a point
-    /// above a row's lines with its first line, the gutter: the empty band
-    /// around a header would otherwise be the nick.
+    /// Past the end counts too, because the caret hit-test answers a point
+    /// on that line with the nearest line box, the gutter's: the space
+    /// after a header would otherwise be the nick.
     pub fn reply_at(&mut self, x: i32, y: u64) -> Option<(MessageId, bool)> {
         let hit = self.index.locate(y)?;
         let row = self.rows.get(hit.row)?;
         let r: ReplyBox = **row.layout.as_ref()?.reply.as_ref()?;
-        if hit.offset < r.y || hit.offset >= r.y + r.height {
+        // Left of it, on its line, is the nick.
+        if hit.offset < r.y || hit.offset >= r.y + r.height || x < r.x as i32 {
             return None;
         }
-        let on = x >= r.x as i32 && x < (r.x + r.width) as i32;
-        Some((row.id, on))
+        Some((row.id, x < (r.x + r.width) as i32))
     }
 
     /// A selection covering the whole buffer, or `None` when empty.
@@ -1319,8 +1323,8 @@ impl ChatBuffer {
         let offset = if rel <= 0 {
             range.start
         } else {
-            let (fit, _) = measure.fit_prefix(slice, Style::default(), rel as u32);
-            (range.start + fit).min(range.end)
+            let at = measure.offset_at_x(slice, Style::default(), rel as u32);
+            (range.start + at).min(range.end)
         };
 
         Some(Caret {

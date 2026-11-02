@@ -82,6 +82,18 @@ pub trait TextMeasure {
         fit_prefix_by_search(self, text, style, max_width)
     }
 
+    /// The caret a point `x` pixels into `text` lands on: a byte offset on
+    /// a character boundary, at most `text.len()`.
+    ///
+    /// A question about where glyphs are drawn, where
+    /// [`TextMeasure::fit_prefix`] is one about how much text fits. On
+    /// left-to-right text they agree, which is the default; on a
+    /// right-to-left run the first characters are drawn at the right, and
+    /// an implementation that shapes text answers from where they are.
+    fn offset_at_x(&self, text: &str, style: Style, x: u32) -> usize {
+        self.fit_prefix(text, style, x).0
+    }
+
     /// Rendered size of an image block, given its intrinsic size and the
     /// width available.
     ///

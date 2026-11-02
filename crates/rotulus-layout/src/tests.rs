@@ -4008,7 +4008,7 @@ fn focus_steps_through_items_in_reading_order_and_off_the_ends() {
 
 use crate::buffer::ReplyChange;
 use crate::message::Reply;
-use crate::wrap::{estimate_row_height, layout_row};
+use crate::wrap::{estimate_row_height, layout_row, REPLY_TEXT_CAP};
 
 fn quote(nick: &str, excerpt: &str) -> Reply {
     Reply::Quote {
@@ -4019,7 +4019,8 @@ fn quote(nick: &str, excerpt: &str) -> Reply {
 }
 
 #[test]
-fn a_reply_header_takes_the_first_line_and_the_rest_moves_below_it() {
+fn a_reply_header_goes_beside_the_nick_and_the_body_below_it() {
+    // 16px lines, so a 4px gap above a row that replies.
     let m = FixedMeasure::new(8);
     let mut p = params(400);
     p.indent = true;
@@ -4030,21 +4031,17 @@ fn a_reply_header_takes_the_first_line_and_the_rest_moves_below_it() {
     let plain = layout_message(&msg, &p, gen, &m);
     let l = layout_row(&msg, Some(&quote("bo", "hi")), &p, gen, &m);
     let r = **l.reply.as_ref().expect("a header");
+    let (gutter, body) = (&l.lines[0], &l.lines[1]);
+    assert_eq!(gutter.source, LineSource::Gutter);
     assert_eq!(
         (r.x, r.y, r.height),
-        (80, 0, 16),
-        "over the body column, on the row's first line"
+        (80, 4, 16),
+        "in the body column, past a gap"
     );
-    assert_eq!(l.height, plain.height + 16);
-    for (was, now) in plain.lines.iter().zip(&l.lines) {
-        assert_eq!(now.y, was.y + 16, "{:?} moves down a line", now.source);
-        assert_eq!((now.x, &now.range), (was.x, &was.range));
-    }
-    assert_eq!(
-        l.avatar.map(|a| a.y),
-        Some(16),
-        "the avatar stays beside the nick"
-    );
+    assert_eq!(gutter.y, r.y, "on the nick's line, the row's own first");
+    assert_eq!((body.x, body.y), (80, 20), "the body on the line after");
+    assert_eq!(l.avatar.map(|a| a.y), Some(4), "the avatar beside the nick");
+    assert_eq!((plain.height, l.height), (32, 36));
     // Two spaces' width for the bar, the nick, a space, the excerpt.
     let n = r.nick.expect("a quote names its author");
     assert_eq!((n.x, n.width, n.len, n.ellipsis), (96, 16, 2, false));
@@ -4055,13 +4052,13 @@ fn a_reply_header_takes_the_first_line_and_the_rest_moves_below_it() {
     assert_eq!(r.x + r.width, 136, "the header ends where its text does");
     assert_eq!(
         (plain.stamp_y(), l.stamp_y()),
-        (0, 16),
-        "the timestamp tops what is below the header, as it tops a row"
+        (0, 4),
+        "the timestamp tops the row's lines, past the gap"
     );
 }
 
 #[test]
-fn in_one_column_the_header_starts_where_the_nick_does() {
+fn in_one_column_the_header_goes_where_the_body_would_have_begun() {
     let m = FixedMeasure::new(8);
     let mut p = params(400);
     p.stamp_width = 40;
@@ -4072,12 +4069,20 @@ fn in_one_column_the_header_starts_where_the_nick_does() {
         LayoutGeneration::default(),
         &m,
     );
-    assert_eq!(l.reply.as_ref().map(|r| (r.x, r.y)), Some((40, 0)));
     let gutter = &l.lines[0];
-    assert_eq!(gutter.source, crate::wrap::LineSource::Gutter);
-    assert_eq!((gutter.x, gutter.y), (40, 16));
-    assert_eq!(l.lines[1].y, 16, "the body stays beside the nick");
-    assert_eq!(l.stamp_y(), 16, "and so does the timestamp");
+    assert_eq!(gutter.source, LineSource::Gutter);
+    assert_eq!((gutter.x, gutter.y), (40, 4));
+    assert_eq!(
+        l.reply.as_ref().map(|r| (r.x, r.y)),
+        Some((80, 4)),
+        "past the stamp and \"<al> \", on their line"
+    );
+    assert_eq!(
+        (l.lines[1].x, l.lines[1].y),
+        (0, 20),
+        "the body below, from the edge"
+    );
+    assert_eq!(l.stamp_y(), 4);
 }
 
 #[test]
@@ -4155,7 +4160,7 @@ fn a_reply_set_later_grows_its_row_and_outlives_an_edit() {
         ReplyChange::Changed
     );
     assert!(b.layout_at(1).is_none(), "the old layout is stale");
-    assert_eq!(b.ensure_layout(1, &m), before + 16);
+    assert_eq!(b.ensure_layout(1, &m), before + 20);
     assert_eq!(
         b.set_reply(id, Some(quote("al", "one")), &m),
         ReplyChange::Unchanged
@@ -4166,7 +4171,7 @@ fn a_reply_set_later_grows_its_row_and_outlives_an_edit() {
     );
     assert!(b.replace(id, nick_row("bo", "two, edited"), &m));
     assert_eq!(b.reply(id), Some(&quote("al", "one")), "an edit keeps it");
-    assert_eq!(b.ensure_layout(1, &m), before + 16);
+    assert_eq!(b.ensure_layout(1, &m), before + 20);
     assert_eq!(b.set_reply(id, None, &m), ReplyChange::Changed);
     assert_eq!(b.ensure_layout(1, &m), before);
 }
@@ -4221,6 +4226,16 @@ fn a_reply_is_kept_to_one_line() {
         b.set_reply(id, Some(set), &m);
         assert_eq!(b.reply(id), Some(&want));
     }
+    // And holds no more than it keeps, however much it was cut from.
+    b.set_reply(id, Some(Reply::Unavailable("y".repeat(100_000))), &m);
+    let Some(Reply::Unavailable(kept)) = b.reply(id) else {
+        panic!("no header");
+    };
+    assert!(
+        kept.capacity() < 4 * REPLY_TEXT_CAP,
+        "{} bytes held",
+        kept.capacity()
+    );
 }
 
 #[test]
@@ -4253,20 +4268,16 @@ fn a_point_on_a_header_finds_it_and_beside_it_finds_nothing_else() {
     b.ensure_visible(0, 200, &m);
     let r = **b.layout_at(0).unwrap().reply.as_ref().unwrap();
     let (x, end) = (r.x as i32, (r.x + r.width) as i32);
-    assert_eq!(b.reply_at(x, 1), Some((id, true)));
-    assert_eq!(b.reply_at(end - 1, 15), Some((id, true)));
-    assert_eq!(
-        b.reply_at(end + 5, 1),
-        Some((id, false)),
-        "beside the header"
-    );
-    assert_eq!(
-        b.reply_at(2, 1),
-        Some((id, false)),
-        "over the gutter, above the nick"
-    );
-    assert_eq!(b.reply_at(x, 17), None, "the body's line");
-    let c = b.hit_test(x + 1, 17, &m).unwrap();
+    assert_eq!(r.y, 4);
+    assert_eq!(b.reply_at(x, 5), Some((id, true)));
+    assert_eq!(b.reply_at(end - 1, 19), Some((id, true)));
+    assert_eq!(b.reply_at(end + 5, 5), Some((id, false)), "past its end");
+    assert_eq!(b.reply_at(x, 1), None, "the gap above the row");
+    assert_eq!(b.reply_at(2, 5), None, "the nick beside it");
+    let nick = b.hit_test(x - 10, 5, &m).unwrap();
+    assert_eq!(nick.source, LineSource::Gutter, "is the nick's");
+    assert_eq!(b.reply_at(x, 21), None, "the body's line");
+    let c = b.hit_test(x + 1, 21, &m).unwrap();
     assert_eq!(
         (c.source, c.offset),
         (LineSource::Block(0), 0),

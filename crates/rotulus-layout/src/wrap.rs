@@ -92,11 +92,16 @@ pub struct LayoutCache {
 }
 
 impl LayoutCache {
-    /// Where the timestamp goes: beside the nick and the body, below a
-    /// reply header.
+    /// Where the timestamp goes: the top of the row's lines, below the gap
+    /// a reply leaves above them.
     pub fn stamp_y(&self) -> u32 {
-        self.reply.as_ref().map_or(0, |r| r.height)
+        self.reply.as_ref().map_or(0, |r| reply_gap(r.height))
     }
+}
+
+/// The space above a row that replies, for a line `line_h` tall.
+fn reply_gap(line_h: u32) -> u32 {
+    (line_h / 4).max(1)
 }
 
 /// Where a row's reply header goes, in row-local coordinates: a bar, the
@@ -265,25 +270,13 @@ pub fn layout_row(
     };
     let body_width = params.width.saturating_sub(body_x).max(line_h);
 
-    // The header takes the row's first line, over the body column (or,
-    // in one column, from where the nick starts). Everything else — the
-    // gutter and the avatar too — starts below it, so the nick stays
-    // beside what its owner wrote rather than beside the quote.
-    let reply = reply.map(|r| {
-        let x = if params.indent {
-            body_x
-        } else {
-            params.stamp_width
-        };
-        Box::new(layout_reply(
-            r,
-            x,
-            params.width.saturating_sub(x),
-            line_h,
-            measure,
-        ))
-    });
-    let top = reply.as_ref().map_or(0, |r| r.height);
+    // A row that replies starts a little apart from the row above, so
+    // its quote can't be read as the end of that row's message.
+    let top = if reply.is_some() {
+        reply_gap(line_h)
+    } else {
+        0
+    };
     let mut y = top;
 
     // The gutter is one unwrapped line, always first, carrying the x it
@@ -353,7 +346,24 @@ pub fn layout_row(
     // Either way the first line is left to the stamp and the gutter, which
     // the view draws there; a lead is only ever nonzero because one of
     // them is.
+    let beside = lead;
     if lead > 0 && (!matches!(msg.blocks.first(), Some(Block::Text(_))) || lead > body_width / 2) {
+        y = top + line_h;
+        lead = 0;
+    }
+
+    // The reply header goes on the row's first line, beside the nick: in
+    // the body column, or in one column where the body would have begun.
+    // That line is the row's own, so the quote reads as the start of this
+    // message rather than the end of the one above; the body starts on
+    // the line after it.
+    let mut reply = reply.map(|r| {
+        let x = if params.indent { body_x } else { beside };
+        let mut b = layout_reply(r, x, params.width.saturating_sub(x), line_h, measure);
+        b.y = top;
+        Box::new(b)
+    });
+    if reply.is_some() {
         y = top + line_h;
         lead = 0;
     }
@@ -538,6 +548,9 @@ pub fn layout_row(
         let shift = (row_h - text_h) / 2;
         for l in &mut lines {
             l.y += shift;
+        }
+        if let Some(r) = &mut reply {
+            r.y += shift;
         }
     }
 
@@ -964,7 +977,8 @@ pub fn estimate_row_height(
     params: &LayoutParams,
     measure: &dyn TextMeasure,
 ) -> u32 {
-    let header = reply.map_or(0, |_| measure.metrics().line_height.max(1));
+    let line_h = measure.metrics().line_height.max(1);
+    let header = reply.map_or(0, |_| line_h + reply_gap(line_h));
     header + estimate_height(msg, params, measure)
 }
 

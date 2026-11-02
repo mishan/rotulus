@@ -274,6 +274,33 @@ fn right_to_left_text_fits_as_much_as_left_to_right() {
 }
 
 #[test]
+fn a_click_lands_where_right_to_left_text_is_drawn() {
+    // Hebrew is drawn from the right: a point near the left edge is near
+    // its logical end, and one near the right edge near its start. The
+    // logical prefix search that wraps it would put both at the start.
+    let m = m();
+    let plain = Style::default();
+    let s = "\u{5e9}\u{5dc}\u{5d5}\u{5dd} \u{5e2}\u{5d5}\u{5dc}\u{5dd} \u{5d6}\u{5d4}";
+    let full = m.run_width(s, plain);
+    let chars = |at: usize| s[..at].chars().count();
+    let all = s.chars().count();
+    let left = m.offset_at_x(s, plain, 2);
+    let right = m.offset_at_x(s, plain, full - 2);
+    assert!(s.is_char_boundary(left) && s.is_char_boundary(right));
+    assert!(
+        chars(left) + 2 >= all,
+        "the left edge is the end, got {left}"
+    );
+    assert!(
+        chars(right) <= 1,
+        "the right edge is the start, got {right}"
+    );
+    let latin = "left to right";
+    assert_eq!(m.offset_at_x(latin, plain, 1), 0);
+    assert_eq!(m.offset_at_x(latin, plain, 10_000), latin.len());
+}
+
+#[test]
 fn fit_prefix_makes_progress_on_a_tiny_budget() {
     // Returning 0 for a non-empty run would hang the wrap loop. The
     // engine guards against it too, but the measurer must not rely on
@@ -1399,6 +1426,41 @@ fn check_replies() {
     view.open_focused_menu();
     assert_eq!(*seen.borrow(), [format!("reply {n}"), format!("row {n}")]);
 
+    // The Menu key on an image opens its row's menu, though the point the
+    // menu opens from, under the image, is on the selected row below.
+    let image = view.append(rotulus_layout::Message {
+        kind: rotulus_layout::MessageKind::Live,
+        timestamp: 1_000,
+        speaker: None,
+        gutter: None,
+        blocks: vec![rotulus_layout::Block::Image {
+            token: 3,
+            size: None,
+            alt: "[image]".into(),
+        }]
+        .into(),
+        flags: rotulus_layout::MessageFlags::NONE,
+    });
+    let below = view.append(message_row(8, "bo", "selected words"));
+    let _holder = laid_out(&view);
+    let below_row = view.imp_ref().buffer.borrow().row_of(below).unwrap();
+    let below_sel = view.imp_ref().buffer.borrow().select_row(below_row);
+    view.imp_ref().selection.replace(below_sel);
+    view.imp_ref().focus_item.replace(Some(FocusItem::Image {
+        message: image,
+        block: 0,
+    }));
+    seen.borrow_mut().clear();
+    view.open_focused_menu();
+    assert_eq!(*seen.borrow(), [format!("row {}", image.0)]);
+    view.clear_selection();
+    assert!(view.remove(image) && view.remove(below));
+    let _holder = laid_out(&view);
+    seen.borrow_mut().clear();
+    view.imp_ref()
+        .focus_item
+        .replace(Some(FocusItem::Reply { message: id }));
+
     // The header changes and goes without the rest of the row.
     assert!(view.set_reply(id, Some(Reply::Unavailable("deleted".into()))));
     let _holder = laid_out(&view);
@@ -1448,6 +1510,56 @@ fn check_replies() {
     view.imp_ref().selection.replace(first_row);
     view.open_menu_at(on_text.0, on_text.1);
     assert_eq!(*seen.borrow(), [format!("row {n}")]);
+
+    // A right-click is on the selection where it is painted: inside a
+    // selected character's glyph, whatever caret the point maps to, and
+    // not beside it, though a point left of the body maps to its start.
+    let x = view.append(message_row(9, "cy", "x"));
+    let _holder = laid_out(&view);
+    let (glyph, past, before) = {
+        let mut buf = view.imp_ref().buffer.borrow_mut();
+        let row = buf.row_of(x).unwrap();
+        let top = buf.index_mut().offset_of(row) as f64;
+        let b = buf
+            .layout_at(row)
+            .unwrap()
+            .lines
+            .iter()
+            .find(|l| l.source == rotulus_layout::LineSource::Block(0))
+            .unwrap()
+            .clone();
+        let y = f64::from(crate::view::PAD_Y) + top + f64::from(b.y) + 2.0;
+        let x0 = f64::from(crate::view::PAD_X) + f64::from(b.x);
+        (
+            (x0 + 1.0, y),
+            (x0 + f64::from(b.width) + 20.0, y),
+            (x0 - 3.0, y),
+        )
+    };
+    let only_x = {
+        let buf = view.imp_ref().buffer.borrow();
+        let row = buf.row_of(x).unwrap();
+        buf.select_row(row).map(|mut s| {
+            s.anchor = rotulus_layout::Caret {
+                message: x,
+                source: rotulus_layout::LineSource::Block(0),
+                offset: 0,
+            };
+            s
+        })
+    };
+    view.imp_ref().selection.replace(only_x);
+    seen.borrow_mut().clear();
+    view.open_menu_at(glyph.0, glyph.1);
+    assert_eq!(*seen.borrow(), Vec::<String>::new(), "on the glyph: Copy");
+    view.open_menu_at(past.0, past.1);
+    // Just before it, short of the body, whose first caret is selected.
+    view.open_menu_at(before.0, before.1);
+    assert_eq!(
+        *seen.borrow(),
+        [format!("row {}", x.0), format!("row {}", x.0)],
+        "off the glyph either side: the row's"
+    );
 
     view.clear_selection();
     assert!(view.remove(id));

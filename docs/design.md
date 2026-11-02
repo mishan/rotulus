@@ -921,14 +921,19 @@ another message, so copying a reply copies what was written in it.
 Headers live beside the rows in the buffer rather than in each one,
 since most rows have none.
 
-The header takes the row's first line, over the body column, and the
-gutter, the avatar and the timestamp move down beside the body, so a
-nick stays next to what its owner wrote. In one column it starts where
-the nick does. A row with a header starts a group of its own, so its
-quote isn't read as part of the message above. A click on it is
-`reply-activated`; a click beside it is nothing, rather than the nick
-under it. Keyboard focus on a header that is taken away moves on to the
-next thing on its row.
+The header goes on the row's own first line, beside the timestamp, the
+nick and the avatar, in the body column (in one column, where the body
+would have begun), and the body starts on the line after it; a row that
+replies also starts a little apart from the one above. The first
+version put the header on a line of its own above the nick, and read
+wrong: directly under the previous row's text and a line above its own
+nick, a quote looked like the end of the message above, or like its
+author speaking. On the nick's line it can only be the start of this
+row. A row with a header starts a group of its own, so its nick is
+always drawn beside it. A click on it is `reply-activated`; a click past
+its end is nothing, rather than the nick the caret hit-test would find
+on that line. Keyboard focus on a header that is taken away moves on to
+the next thing on its row.
 
 ### Accessibility
 
