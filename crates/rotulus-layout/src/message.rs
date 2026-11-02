@@ -8,7 +8,7 @@
 //!
 //! See docs/design.md "The message model".
 
-use crate::span::ParsedText;
+use crate::span::{Attrs, ColorRef, ParsedText};
 
 /// Stable identity for one row, unique within a [`crate::ChatBuffer`].
 ///
@@ -144,6 +144,41 @@ impl Speaker {
             key,
             nick: nick.into(),
             color: None,
+        }
+    }
+}
+
+/// The message a row replies to, drawn as a compact line above its body.
+///
+/// Not a [`Block`]: blocks are what the person wrote, which the
+/// application replaces on an edit and a reader selects and copies. The
+/// quote is the application's account of another message, often fetched
+/// after the row arrives, so it is set on the row by its mark and outlives
+/// a replace. See docs/design.md "Replies".
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Reply {
+    /// The original's author and a short plain-text excerpt of it, cut to
+    /// one line where it is drawn.
+    Quote {
+        nick: String,
+        /// [`ColorRef::Default`] is the view's nick color.
+        color: ColorRef,
+        excerpt: String,
+    },
+    /// The original can't be shown — not fetched yet, deleted, out of
+    /// reach — in the application's words.
+    Unavailable(String),
+}
+
+impl Reply {
+    /// The attributes the nick is drawn, and so measured, in.
+    pub const NICK_ATTRS: Attrs = Attrs::BOLD;
+
+    /// The attributes the excerpt or the unavailable text is drawn in.
+    pub fn text_attrs(&self) -> Attrs {
+        match self {
+            Reply::Quote { .. } => Attrs::NONE,
+            Reply::Unavailable(_) => Attrs::ITALIC,
         }
     }
 }

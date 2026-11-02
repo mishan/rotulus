@@ -45,3 +45,11 @@ msgstr "{text}、{kind}"
 msgctxt "zoom level"
 msgid "{percent}%"
 msgstr "{percent}%"
+
+msgctxt "accessible reply"
+msgid "replying to {nick}: {excerpt}"
+msgstr "{nick}への返信：{excerpt}"
+
+msgctxt "accessible reply"
+msgid "replying to a message: {text}"
+msgstr "メッセージへの返信：{text}"

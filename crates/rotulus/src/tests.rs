@@ -50,6 +50,7 @@ fn palette_constants_match_rotulus_h() {
         ("ROTULUS_PAL_MARK_BG", crate::view::PAL_MARK_BG),
         ("ROTULUS_PAL_MUTED", crate::view::PAL_HISTORY_MUTED),
         ("ROTULUS_PAL_MARKER", crate::view::PAL_MARKER),
+        ("ROTULUS_PAL_NICK", crate::view::PAL_NICK),
         ("ROTULUS_PAL_NICK_COLOR0", crate::view::PAL_NICK_COLOR0),
         ("ROTULUS_PAL_TIMESTAMP", crate::view::PAL_TIMESTAMP),
         ("ROTULUS_PAL_RULE", crate::view::PAL_RULE),
@@ -228,6 +229,81 @@ fn fit_prefix_honours_its_contract() {
             );
         }
     }
+}
+
+#[test]
+fn right_to_left_text_fits_as_much_as_left_to_right() {
+    // An x on a right-to-left line is visual, so the index Pango maps it
+    // to isn't the end of the logical prefix that fits: a Hebrew excerpt
+    // kept a few characters, and a Hebrew body wrapped a few to a line.
+    let m = m();
+    let plain = Style::default();
+    for s in [
+        "\u{5e9}\u{5dc}\u{5d5}\u{5dd} \u{5e2}\u{5d5}\u{5dc}\u{5dd} \u{5d6}\u{5d4} \u{5de}\u{5d1}\u{5d7}\u{5df} \u{5d0}\u{5e8}\u{5d5}\u{5da} \u{5e9}\u{5dc} \u{5e9}\u{5d5}\u{5e8}\u{5d4}",
+        "\u{645}\u{631}\u{62d}\u{628}\u{627} \u{628}\u{627}\u{644}\u{639}\u{627}\u{644}\u{645} \u{647}\u{630}\u{627} \u{633}\u{637}\u{631} \u{637}\u{648}\u{64a}\u{644}",
+        "mixed \u{5e9}\u{5dc}\u{5d5}\u{5dd} \u{5e2}\u{5d5}\u{5dc}\u{5dd} and more text",
+    ] {
+        let budget = m.run_width(s, plain) / 2;
+        let (n, w) = m.fit_prefix(s, plain, budget);
+        let (kept, all) = (s[..n].chars().count(), s.chars().count());
+        assert!(w <= budget, "{s:?}: {w} over {budget}");
+        assert!(
+            kept + 4 >= all / 2,
+            "{s:?}: kept {kept} of {all} characters in half its width"
+        );
+
+        let width = budget + m.metrics().space_width;
+        let msg = rotulus_layout::Message::system(rotulus_layout::ParsedText::plain(s));
+        let p = rotulus_layout::LayoutParams {
+            width,
+            indent: false,
+            ..Default::default()
+        };
+        let l = rotulus_layout::wrap::layout_message(
+            &msg,
+            &p,
+            rotulus_layout::LayoutGeneration::default(),
+            &m,
+        );
+        assert!(
+            l.lines.len() <= 3,
+            "{s:?}: twice the width wraps to {} lines",
+            l.lines.len()
+        );
+    }
+}
+
+#[test]
+fn a_click_lands_where_right_to_left_text_is_drawn() {
+    // Hebrew is drawn from the right: a point near the left edge is near
+    // its logical end, and one near the right edge near its start. The
+    // logical prefix search that wraps it would put both at the start.
+    let m = m();
+    let plain = Style::default();
+    let s = "\u{5e9}\u{5dc}\u{5d5}\u{5dd} \u{5e2}\u{5d5}\u{5dc}\u{5dd} \u{5d6}\u{5d4}";
+    let full = m.run_width(s, plain);
+    let chars = |at: usize| s[..at].chars().count();
+    let all = s.chars().count();
+    let left = m.offset_at_x(s, plain, 2);
+    let right = m.offset_at_x(s, plain, full as i32 - 2);
+    assert!(s.is_char_boundary(left) && s.is_char_boundary(right));
+    assert!(
+        chars(left) + 2 >= all,
+        "the left edge is the end, got {left}"
+    );
+    assert!(
+        chars(right) <= 1,
+        "the right edge is the start, got {right}"
+    );
+    let latin = "left to right";
+    // Left of the line is its end, after the last character; inside the
+    // leftmost glyph, the last character itself.
+    let last = s.char_indices().next_back().unwrap().0;
+    assert_eq!(m.offset_at_x(s, plain, -5), s.len());
+    assert_eq!(m.offset_at_x(s, plain, 1), last);
+    assert_eq!(m.offset_at_x(latin, plain, -5), 0);
+    assert_eq!(m.offset_at_x(latin, plain, 1), 0);
+    assert_eq!(m.offset_at_x(latin, plain, 10_000), latin.len());
 }
 
 #[test]
@@ -413,6 +489,8 @@ fn gtk_class_and_construction_smoke() {
             c"load-more",
             c"media-activated",
             c"selection-changed",
+            c"reply-activated",
+            c"row-menu",
         ] {
             let id =
                 gtk4::glib::gobject_ffi::g_signal_lookup(name.as_ptr() as *const _, t.into_glib());
@@ -744,6 +822,7 @@ fn gtk_class_and_construction_smoke() {
 
     check_offscreen_animation_stops();
     check_typed_signals();
+    check_replies();
     check_replace_and_marker();
     check_text_scale_remeasures();
     check_keyboard_focus();
@@ -1207,6 +1286,444 @@ fn check_typed_signals() {
     view.clear_selection();
     assert!(!view.property::<bool>("has-selection"));
     assert_eq!((changes.get(), notified.get()), (2, 2));
+}
+
+/// A reply header and the row menu reach the application as signals naming
+/// the row by its mark, from the pointer and from the keyboard; beside the
+/// header, and on a link or a nick, nothing else answers.
+fn check_replies() {
+    use crate::view::{HoverTarget, RowMark};
+    use rotulus_layout::{ColorRef, FocusItem, Reply};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let view = crate::view::RotulusView::new();
+    view.set_indent(true);
+    view.append(message_row(7, "al", "see https://example.com now"));
+    let id = view.append(message_row(8, "bo", "agreed"));
+    let quote = Reply::Quote {
+        nick: "al".into(),
+        color: ColorRef::Default,
+        excerpt: "see https://example.com now".into(),
+    };
+    assert!(view.set_reply(id, Some(quote)));
+    // In a window, so a menu the view pops for want of a handler has
+    // somewhere to go.
+    let holder = laid_out(&view);
+    let window = gtk4::Window::new();
+    window.set_child(Some(&holder));
+    holder.allocate(400, 300, -1, None);
+
+    let seen: Rc<RefCell<Vec<String>>> = Rc::default();
+    {
+        let seen = seen.clone();
+        view.connect_closure(
+            "reply-activated",
+            false,
+            gtk4::glib::closure_local!(move |_: crate::view::RotulusView, m: RowMark| {
+                seen.borrow_mut().push(format!("reply {}", m.0 .0));
+            }),
+        );
+    }
+    {
+        let seen = seen.clone();
+        view.connect_closure(
+            "row-menu",
+            false,
+            gtk4::glib::closure_local!(move |_: crate::view::RotulusView,
+                                             m: RowMark,
+                                             _x: f64,
+                                             _y: f64|
+                  -> bool {
+                seen.borrow_mut().push(format!("row {}", m.0 .0));
+                true
+            }),
+        );
+    }
+    {
+        let seen = seen.clone();
+        view.connect_closure(
+            "link-menu",
+            false,
+            gtk4::glib::closure_local!(move |_: crate::view::RotulusView,
+                                             _href: String,
+                                             _x: f64,
+                                             _y: f64|
+                  -> bool {
+                seen.borrow_mut().push("link".into());
+                true
+            }),
+        );
+    }
+    {
+        let seen = seen.clone();
+        view.connect_closure(
+            "speaker-menu",
+            false,
+            gtk4::glib::closure_local!(move |_: crate::view::RotulusView,
+                                             key: u64,
+                                             _x: f64,
+                                             _y: f64| {
+                seen.borrow_mut().push(format!("speaker {key}"));
+            }),
+        );
+    }
+
+    let header = find_point(&view, 1, |t| *t == HoverTarget::Reply { message: id })
+        .expect("the header is hittable");
+    let (beside, body) = {
+        let buf = view.imp_ref().buffer.borrow();
+        let l = buf.layout_at(1).unwrap();
+        let r = **l.reply.as_ref().unwrap();
+        let b = l
+            .lines
+            .iter()
+            .find(|l| l.source == rotulus_layout::LineSource::Block(0))
+            .unwrap();
+        let x = |x: u32| f64::from(crate::view::PAD_X) + f64::from(x) + 2.0;
+        let y = |y: u32| header.1 + f64::from(y) - f64::from(r.y);
+        ((x(r.x + r.width + 8), header.1), (x(b.x), y(b.y)))
+    };
+    assert_eq!(
+        view.hover_target_at(beside.0, beside.1),
+        None,
+        "past the header is not the nick on its line"
+    );
+    // Nor is the gap above the row, across its whole width.
+    let row_top = {
+        let mut buf = view.imp_ref().buffer.borrow_mut();
+        f64::from(crate::view::PAD_Y) + buf.index_mut().offset_of(1) as f64
+    };
+    for x in [f64::from(crate::view::PAD_X) + 2.0, header.0, 390.0] {
+        assert_eq!(
+            view.hover_target_at(x, row_top + 1.0),
+            None,
+            "the gap at {x}"
+        );
+    }
+    view.activate_at(header.0, header.1);
+    view.activate_at(beside.0, beside.1);
+    for (x, y) in [header, body, beside] {
+        view.open_menu_at(x, y);
+    }
+    let link = find_point(&view, 0, |t| matches!(t, HoverTarget::Link { .. })).unwrap();
+    view.open_menu_at(link.0, link.1);
+    let nick = find_point(&view, 0, |t| matches!(t, HoverTarget::Nick { .. })).unwrap();
+    view.open_menu_at(nick.0, nick.1);
+    let n = id.0;
+    assert_eq!(
+        *seen.borrow(),
+        [
+            format!("reply {n}"),
+            format!("row {n}"),
+            format!("row {n}"),
+            format!("row {n}"),
+            "link".into(),
+            "speaker 7".into(),
+        ]
+    );
+
+    // From the keyboard: the header is its row's stop after the speaker,
+    // Enter is a click on it, and the Menu key opens its row's menu.
+    assert!(view.child_focus(gtk4::DirectionType::TabForward));
+    while view
+        .imp_ref()
+        .focus_item
+        .borrow()
+        .as_ref()
+        .map(|i| i.message())
+        != Some(id)
+    {
+        assert!(view.child_focus(gtk4::DirectionType::TabForward));
+    }
+    assert_eq!(
+        *view.imp_ref().focus_item.borrow(),
+        Some(FocusItem::Speaker { message: id })
+    );
+    assert!(view.child_focus(gtk4::DirectionType::TabForward));
+    let item = view.imp_ref().focus_item.borrow().clone().unwrap();
+    assert_eq!(item, FocusItem::Reply { message: id });
+    assert!(!view.item_boxes(&item).is_empty(), "it has a ring to draw");
+    seen.borrow_mut().clear();
+    assert!(view.activate_focused());
+    view.open_focused_menu();
+    assert_eq!(*seen.borrow(), [format!("reply {n}"), format!("row {n}")]);
+
+    // The Menu key on an image opens its row's menu, though the point the
+    // menu opens from, under the image, is on the selected row below.
+    let image = view.append(rotulus_layout::Message {
+        kind: rotulus_layout::MessageKind::Live,
+        timestamp: 1_000,
+        speaker: None,
+        gutter: None,
+        blocks: vec![rotulus_layout::Block::Image {
+            token: 3,
+            size: None,
+            alt: "[image]".into(),
+        }]
+        .into(),
+        flags: rotulus_layout::MessageFlags::NONE,
+    });
+    let below = view.append(message_row(8, "bo", "selected words"));
+    let _holder = laid_out(&view);
+    let below_row = view.imp_ref().buffer.borrow().row_of(below).unwrap();
+    let below_sel = view.imp_ref().buffer.borrow().select_row(below_row);
+    view.imp_ref().selection.replace(below_sel);
+    view.imp_ref().focus_item.replace(Some(FocusItem::Image {
+        message: image,
+        block: 0,
+    }));
+    seen.borrow_mut().clear();
+    view.open_focused_menu();
+    assert_eq!(*seen.borrow(), [format!("row {}", image.0)]);
+    view.clear_selection();
+    assert!(view.remove(image) && view.remove(below));
+    let _holder = laid_out(&view);
+    seen.borrow_mut().clear();
+    view.imp_ref()
+        .focus_item
+        .replace(Some(FocusItem::Reply { message: id }));
+
+    // The header changes and goes without the rest of the row.
+    assert!(view.set_reply(id, Some(Reply::Unavailable("deleted".into()))));
+    assert_eq!(
+        *view.imp_ref().focus_item.borrow(),
+        Some(FocusItem::Reply { message: id }),
+        "a header that changes keeps focus"
+    );
+    let _holder = laid_out(&view);
+    assert!(find_point(&view, 1, |t| *t == HoverTarget::Reply { message: id }).is_some());
+    assert!(view.replace(id, message_row(8, "bo", "agreed, see https://example.com")));
+    view.imp_ref()
+        .focus_item
+        .replace(Some(FocusItem::Reply { message: id }));
+    assert!(view.set_reply(id, None));
+    assert!(
+        matches!(
+            *view.imp_ref().focus_item.borrow(),
+            Some(FocusItem::Link { message, .. }) if message == id
+        ),
+        "focus on a header that went moves on to what came after it"
+    );
+    let _holder = laid_out(&view);
+    assert!(find_point(&view, 1, |t| matches!(t, HoverTarget::Reply { .. })).is_none());
+
+    // On the selection, or on a row that isn't a message, a right-click is
+    // the view's: no row menu. A selection elsewhere doesn't matter.
+    view.append(rotulus_layout::Message {
+        kind: rotulus_layout::MessageKind::LoadMore(rotulus_layout::LoadMoreDirection::Older),
+        timestamp: 1_000,
+        speaker: None,
+        gutter: None,
+        blocks: vec![rotulus_layout::Block::text("load older")].into(),
+        flags: rotulus_layout::MessageFlags::NONE,
+    });
+    let _holder = laid_out(&view);
+    seen.borrow_mut().clear();
+    let more = find_point(&view, 2, |t| matches!(t, HoverTarget::LoadMore { .. })).unwrap();
+    view.open_menu_at(more.0, more.1);
+    let on_text = {
+        let mut buf = view.imp_ref().buffer.borrow_mut();
+        let top = buf.index_mut().offset_of(1) as f64;
+        let l = buf.layout_at(1).unwrap();
+        let b = l
+            .lines
+            .iter()
+            .find(|l| l.source == rotulus_layout::LineSource::Block(0))
+            .unwrap();
+        (
+            f64::from(crate::view::PAD_X) + f64::from(b.x) + 2.0,
+            f64::from(crate::view::PAD_Y) + top + f64::from(b.y) + 2.0,
+        )
+    };
+    assert_eq!(view.hover_target_at(on_text.0, on_text.1), None);
+    view.select_all();
+    view.open_menu_at(on_text.0, on_text.1);
+    assert_eq!(*seen.borrow(), Vec::<String>::new());
+    let first_row = view.imp_ref().buffer.borrow().select_row(0);
+    view.imp_ref().selection.replace(first_row);
+    view.open_menu_at(on_text.0, on_text.1);
+    assert_eq!(*seen.borrow(), [format!("row {n}")]);
+
+    // A right-click is on the selection where it is painted: inside a
+    // selected character's glyph, whatever caret the point maps to, and
+    // not beside it, though a point left of the body maps to its start.
+    let x = view.append(message_row(9, "cy", "x"));
+    let _holder = laid_out(&view);
+    let (glyph, past, before) = {
+        let mut buf = view.imp_ref().buffer.borrow_mut();
+        let row = buf.row_of(x).unwrap();
+        let top = buf.index_mut().offset_of(row) as f64;
+        let b = buf
+            .layout_at(row)
+            .unwrap()
+            .lines
+            .iter()
+            .find(|l| l.source == rotulus_layout::LineSource::Block(0))
+            .unwrap()
+            .clone();
+        let y = f64::from(crate::view::PAD_Y) + top + f64::from(b.y) + 2.0;
+        let x0 = f64::from(crate::view::PAD_X) + f64::from(b.x);
+        (
+            (x0 + 1.0, y),
+            (x0 + f64::from(b.width) + 20.0, y),
+            (x0 - 3.0, y),
+        )
+    };
+    let only_x = {
+        let buf = view.imp_ref().buffer.borrow();
+        let row = buf.row_of(x).unwrap();
+        buf.select_row(row).map(|mut s| {
+            s.anchor = rotulus_layout::Caret {
+                message: x,
+                source: rotulus_layout::LineSource::Block(0),
+                offset: 0,
+            };
+            s
+        })
+    };
+    view.imp_ref().selection.replace(only_x);
+    seen.borrow_mut().clear();
+    view.open_menu_at(glyph.0, glyph.1);
+    assert_eq!(*seen.borrow(), Vec::<String>::new(), "on the glyph: Copy");
+    view.open_menu_at(past.0, past.1);
+    // Just before it, short of the body, whose first caret is selected.
+    view.open_menu_at(before.0, before.1);
+    assert_eq!(
+        *seen.borrow(),
+        [format!("row {}", x.0), format!("row {}", x.0)],
+        "off the glyph either side: the row's"
+    );
+
+    // A decoded image paints no selection over itself, so a right-click
+    // on a selected one is its row's.
+    let picture = view.append(rotulus_layout::Message {
+        kind: rotulus_layout::MessageKind::Live,
+        timestamp: 1_000,
+        speaker: None,
+        gutter: None,
+        blocks: vec![rotulus_layout::Block::Image {
+            token: 5,
+            size: None,
+            alt: "[a picture]".into(),
+        }]
+        .into(),
+        flags: rotulus_layout::MessageFlags::NONE,
+    });
+    let pixels = gtk4::glib::Bytes::from_owned(vec![128u8; 60 * 40 * 4]);
+    let texture =
+        gtk4::gdk::MemoryTexture::new(60, 40, gtk4::gdk::MemoryFormat::R8g8b8a8, &pixels, 60 * 4);
+    view.set_media_frames(5, vec![(texture.upcast(), 0)]);
+    let _holder = laid_out(&view);
+    let on_picture = {
+        let mut buf = view.imp_ref().buffer.borrow_mut();
+        let row = buf.row_of(picture).unwrap();
+        let top = buf.index_mut().offset_of(row) as f64;
+        let l = buf.layout_at(row).unwrap().lines[0].clone();
+        assert_eq!((l.width, l.height), (60, 40), "drawn as the picture");
+        (
+            f64::from(crate::view::PAD_X) + f64::from(l.x) + 4.0,
+            f64::from(crate::view::PAD_Y) + top + f64::from(l.y) + 4.0,
+        )
+    };
+    assert!(matches!(
+        view.hover_target_at(on_picture.0, on_picture.1),
+        Some(HoverTarget::Media { token: 5, .. })
+    ));
+    view.select_all();
+    seen.borrow_mut().clear();
+    view.open_menu_at(on_picture.0, on_picture.1);
+    assert_eq!(*seen.borrow(), [format!("row {}", picture.0)]);
+    view.clear_selection();
+
+    // Below the last row is no row, though the caret clamps to it.
+    let below = {
+        let mut buf = view.imp_ref().buffer.borrow_mut();
+        f64::from(crate::view::PAD_Y) + buf.total_height() as f64 + 10.0
+    };
+    assert!(below < 300.0, "room below the rows");
+    seen.borrow_mut().clear();
+    view.open_menu_at(on_picture.0, below);
+    assert_eq!(*seen.borrow(), Vec::<String>::new(), "the view's own menu");
+
+    // A header set since the last draw is found at once: a right-click on
+    // it is its row's menu, not its speaker's.
+    let first = view.append(message_row(8, "bo", "one"));
+    let second = view.append(message_row(
+        8,
+        "bo",
+        "see https://a.example and https://b.example",
+    ));
+    let quote = || Reply::Quote {
+        nick: "al".into(),
+        color: ColorRef::Default,
+        excerpt: "hi".into(),
+    };
+    assert!(view.set_reply(second, Some(quote())));
+    let _holder = laid_out(&view);
+    let row = view.imp_ref().buffer.borrow().row_of(second).unwrap();
+    let on_header = find_point(&view, row, |t| *t == HoverTarget::Reply { message: second })
+        .expect("the header is hittable");
+    assert!(view.set_reply(second, Some(Reply::Unavailable("gone".into()))));
+    seen.borrow_mut().clear();
+    view.open_menu_at(on_header.0, on_header.1);
+    assert_eq!(
+        *seen.borrow(),
+        [format!("row {}", second.0)],
+        "before any draw"
+    );
+
+    // Its row grouped with the one above once its header goes, so the
+    // speaker it had is no stop any more: focus moves on to the first link,
+    // the stop that came after the header.
+    let _holder = laid_out(&view);
+    view.imp_ref()
+        .focus_item
+        .replace(Some(FocusItem::Reply { message: second }));
+    assert!(view.set_reply(second, None));
+    let buf = view.imp_ref().buffer.borrow();
+    assert!(buf
+        .message(second)
+        .unwrap()
+        .flags
+        .contains(rotulus_layout::MessageFlags::GROUPED));
+    let links: Vec<_> = buf.focus_items(buf.row_of(second).unwrap());
+    drop(buf);
+    assert_eq!(
+        view.imp_ref().focus_item.borrow().as_ref(),
+        links.first(),
+        "the first link, not the second"
+    );
+    assert!(matches!(links.first(), Some(FocusItem::Link { .. })));
+    // So does focus on the speaker itself, which the regroup takes away.
+    assert!(view.set_reply(second, Some(quote())));
+    let _holder = laid_out(&view);
+    view.imp_ref()
+        .focus_item
+        .replace(Some(FocusItem::Speaker { message: second }));
+    assert!(view.set_reply(second, None));
+    assert_eq!(
+        view.imp_ref().focus_item.borrow().as_ref(),
+        links.first(),
+        "from a speaker that went, the first stop after it"
+    );
+    assert!(view.remove(first) && view.remove(second));
+
+    view.clear_selection();
+    assert!(view.remove(id));
+    assert!(!view.set_reply(id, None), "a stale mark sets nothing");
+    window.destroy();
+}
+
+#[test]
+fn a_mark_in_a_value_is_a_row_and_null_is_none() {
+    use crate::view::RowMark;
+    use gtk4::glib::value::ToValue;
+    let m = RowMark(rotulus_layout::MessageId(5));
+    assert_eq!(m.to_value().get::<RowMark>(), Ok(m));
+    let null = None::<RowMark>.to_value();
+    assert!(null.get::<RowMark>().is_err(), "NULL is no row");
+    assert_eq!(null.get::<Option<RowMark>>(), Ok(None));
 }
 
 /// Replacing keeps a row's place and id; the marker follows its row out.

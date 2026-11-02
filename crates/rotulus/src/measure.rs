@@ -230,6 +230,12 @@ impl TextMeasure for PangoMeasure {
         w
     }
 
+    /// Pango's own answer, so a click lands where a right-to-left run
+    /// draws its characters, not where its logical prefix would end.
+    fn offset_at_x(&self, text: &str, style: Style, x: i32) -> usize {
+        self.offset_at(text, style, x)
+    }
+
     /// One shaping pass, not the trait default's binary search.
     fn fit_prefix(&self, text: &str, style: Style, max_width: u32) -> (usize, u32) {
         if text.is_empty() || max_width == 0 {
@@ -249,6 +255,19 @@ impl TextMeasure for PangoMeasure {
             // Degrade to one character instead.
             None => return self.min_progress(text, style),
         };
+        // An x on a right-to-left run is a visual position, and the index
+        // it gives isn't the end of the logical prefix that fits: a Hebrew
+        // line kept a few characters. Those lines measure prefixes instead.
+        if line
+            .runs()
+            .iter()
+            .any(|r| r.item().analysis().level() % 2 == 1)
+        {
+            return match rotulus_layout::fit_prefix_by_search(self, text, style, max_width) {
+                (0, _) => self.min_progress(text, style),
+                fit => fit,
+            };
+        }
         let hit = line.x_to_index((max_width as i32) * pango::SCALE);
         // `is_inside` false means the x fell past the end of the line, so
         // everything fits up to that point. Otherwise take the reported
@@ -272,6 +291,31 @@ impl TextMeasure for PangoMeasure {
 }
 
 impl PangoMeasure {
+    /// Where Pango draws the point: the character under `x`, or past
+    /// either side of the line, the end there, whichever way the text runs.
+    fn offset_at(&self, text: &str, style: Style, x: i32) -> usize {
+        if text.is_empty() {
+            return 0;
+        }
+        let layout = self.prepare(text, style);
+        let Some(line) = layout.line_readonly(0) else {
+            return 0;
+        };
+        let hit = line.x_to_index(x.saturating_mul(pango::SCALE));
+        let mut idx = (hit.index().max(0) as usize).min(text.len());
+        while idx > 0 && !text.is_char_boundary(idx) {
+            idx -= 1;
+        }
+        if !hit.is_inside() {
+            idx += text[idx..]
+                .chars()
+                .take(hit.trailing().max(0) as usize)
+                .map(char::len_utf8)
+                .sum::<usize>();
+        }
+        idx
+    }
+
     /// The trait's minimum-progress case: one character, whatever it
     /// measures.
     ///

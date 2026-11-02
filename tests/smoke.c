@@ -67,8 +67,20 @@ main (void)
     g_assert_cmpuint (n, ==, 2);
     g_assert_cmpuint (current, >=, 1);
 
+    /* A reply header, set after its row, changed, and taken away. */
+    g_assert_true (rotulus_view_set_reply (view, second, "alice",
+                                           ROTULUS_COLOR_DEFAULT, "hello"));
+    g_assert_true (rotulus_view_set_reply_rgb (view, second, "alice", 0x26a269,
+                                               "hello"));
+    g_assert_false (rotulus_view_set_reply (view, second, NULL,
+                                            ROTULUS_COLOR_DEFAULT, NULL));
+    g_assert_true (rotulus_view_set_reply_unavailable (view, second, "gone"));
+    g_assert_true (rotulus_view_clear_reply (view, second));
+
     g_assert_true (rotulus_view_remove (view, first));
     g_assert_false (rotulus_view_remove (view, first));
+    g_assert_false (rotulus_view_set_reply (view, first, "alice",
+                                            ROTULUS_COLOR_DEFAULT, "hello"));
 
     int n_runs = 0;
     RotulusRun *runs = rotulus_mirc_parse ("\x02" "a\x02" "b", -1, &n_runs);

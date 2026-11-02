@@ -79,35 +79,25 @@ pub trait TextMeasure {
     /// `pango_layout_line_index_to_x`-style query rather than paying
     /// `log n` shaping passes.
     fn fit_prefix(&self, text: &str, style: Style, max_width: u32) -> (usize, u32) {
-        if text.is_empty() {
-            return (0, 0);
+        fit_prefix_by_search(self, text, style, max_width)
+    }
+
+    /// The caret a point `x` pixels into `text` lands on: a byte offset on
+    /// a character boundary, at most `text.len()`.
+    ///
+    /// A question about where glyphs are drawn, where
+    /// [`TextMeasure::fit_prefix`] is one about how much text fits. On
+    /// left-to-right text they agree, which is the default; on a
+    /// right-to-left run the first characters are drawn at the right, and
+    /// an implementation that shapes text answers from where they are.
+    ///
+    /// `x` may be negative, left of the text, which on left-to-right text
+    /// is its start.
+    fn offset_at_x(&self, text: &str, style: Style, x: i32) -> usize {
+        match u32::try_from(x) {
+            Ok(x) if x > 0 => self.fit_prefix(text, style, x).0,
+            _ => 0,
         }
-        let full = self.run_width(text, style);
-        if full <= max_width {
-            return (text.len(), full);
-        }
-        let mut lo = 0usize;
-        let mut hi = text.len();
-        let mut best = (0usize, 0u32);
-        while lo < hi {
-            let mut mid = lo + (hi - lo) / 2;
-            // Snap to a char boundary; without this the loop can stall
-            // on a multi-byte character.
-            while mid > lo && !text.is_char_boundary(mid) {
-                mid -= 1;
-            }
-            if mid == lo {
-                break;
-            }
-            let w = self.run_width(&text[..mid], style);
-            if w <= max_width {
-                best = (mid, w);
-                lo = mid;
-            } else {
-                hi = mid;
-            }
-        }
-        best
     }
 
     /// Rendered size of an image block, given its intrinsic size and the
@@ -125,6 +115,46 @@ pub trait TextMeasure {
         let scaled_h = ((h as u64 * max_width as u64) / w as u64) as u32;
         (max_width, scaled_h.max(1))
     }
+}
+
+/// [`TextMeasure::fit_prefix`]'s default: a binary search over
+/// [`TextMeasure::run_width`] on character boundaries, for an
+/// implementation whose faster answer doesn't hold for some text.
+pub fn fit_prefix_by_search<M: TextMeasure + ?Sized>(
+    m: &M,
+    text: &str,
+    style: Style,
+    max_width: u32,
+) -> (usize, u32) {
+    if text.is_empty() {
+        return (0, 0);
+    }
+    let full = m.run_width(text, style);
+    if full <= max_width {
+        return (text.len(), full);
+    }
+    let mut lo = 0usize;
+    let mut hi = text.len();
+    let mut best = (0usize, 0u32);
+    while lo < hi {
+        let mut mid = lo + (hi - lo) / 2;
+        // Snap to a char boundary; without this the loop can stall
+        // on a multi-byte character.
+        while mid > lo && !text.is_char_boundary(mid) {
+            mid -= 1;
+        }
+        if mid == lo {
+            break;
+        }
+        let w = m.run_width(&text[..mid], style);
+        if w <= max_width {
+            best = (mid, w);
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    best
 }
 
 /// Deterministic measurer for tests: every character is `char_width`

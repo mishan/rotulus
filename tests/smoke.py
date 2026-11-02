@@ -37,6 +37,16 @@ view.connect("load-more", lambda v, d: seen.append(d))
 view.emit("load-more", Rotulus.LoadDirection.OLDER)
 assert seen == [Rotulus.LoadDirection.OLDER]
 
+# The signals naming a row hand over a mark the view takes back.
+assert view.set_reply(first, "alice", Rotulus.COLOR_DEFAULT, "hello")
+assert view.set_reply_unavailable(first, "gone")
+marked = []
+view.connect("reply-activated", lambda v, mark: marked.append(v.clear_reply(mark)))
+view.connect("row-menu", lambda v, mark, x, y: marked.append(v.clear_reply(mark)) or True)
+view.emit("reply-activated", first)
+assert view.emit("row-menu", first, 1.0, 2.0)
+assert marked == [True, True], marked
+
 view.set_property("markdown", True)
 assert view.get_property("markdown")
 view.set_link_schemes(["https://", "irc://"])

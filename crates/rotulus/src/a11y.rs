@@ -23,7 +23,7 @@
 // still built, so those tests run in every configuration.
 #![cfg_attr(not(feature = "v4_14"), allow(dead_code))]
 
-use rotulus_layout::{Block, Caret, ChatBuffer, LineSource, Linkifier, MessageId};
+use rotulus_layout::{Block, Caret, ChatBuffer, LineSource, Linkifier, MessageId, Reply};
 
 /// Where one of a row's texts sits in the row's line.
 #[derive(Debug, Clone)]
@@ -69,6 +69,42 @@ pub(crate) struct RowFormat {
     pub(crate) stamp: Box<dyn Fn(i64) -> Option<String>>,
     /// Decides which links are disguised, as the view does for a click.
     pub(crate) linkifier: Linkifier,
+    /// How a reply header reads: with `{nick}` and `{excerpt}`, and with
+    /// `{text}` when the original is unavailable.
+    pub(crate) quote: String,
+    pub(crate) unavailable: String,
+}
+
+impl RowFormat {
+    /// A reply header, as read aloud.
+    pub(crate) fn reply(&self, r: &Reply) -> String {
+        match r {
+            Reply::Quote { nick, excerpt, .. } => {
+                fill(&self.quote, &[("{nick}", nick), ("{excerpt}", excerpt)])
+            }
+            Reply::Unavailable(t) => fill(&self.unavailable, &[("{text}", t)]),
+        }
+    }
+}
+
+/// `template` with each placeholder replaced, in one pass, so text put in
+/// for one is never taken for another.
+fn fill(template: &str, args: &[(&str, &str)]) -> String {
+    let mut out = String::new();
+    let mut rest = template;
+    while let Some(c) = rest.chars().next() {
+        match args.iter().find(|(k, _)| rest.starts_with(k)) {
+            Some((k, v)) => {
+                out.push_str(v);
+                rest = &rest[k.len()..];
+            }
+            None => {
+                out.push(c);
+                rest = &rest[c.len_utf8()..];
+            }
+        }
+    }
+    out
 }
 
 fn char_len(s: &str) -> u32 {
@@ -93,7 +129,11 @@ impl TextModel {
     }
 
     /// The row `id` names, as read aloud, and where its parts start.
-    fn row_text(msg: &rotulus_layout::Message, fmt: &RowFormat) -> (String, Vec<Part>) {
+    fn row_text(
+        msg: &rotulus_layout::Message,
+        reply: Option<&Reply>,
+        fmt: &RowFormat,
+    ) -> (String, Vec<Part>) {
         let mut row = String::new();
         let mut parts = Vec::new();
         if let Some(ts) = (fmt.stamp)(msg.timestamp) {
@@ -122,6 +162,12 @@ impl TextModel {
             });
             row.push_str(&g.text);
             row.push(' ');
+        }
+        // After the speaker, who comes first, and before what they said,
+        // which the header is context for.
+        if let Some(r) = reply {
+            row.push_str(&fmt.reply(r));
+            row.push('\n');
         }
         for (bi, b) in msg.blocks.iter().enumerate() {
             if bi > 0 {
@@ -189,7 +235,7 @@ impl TextModel {
         let Some(msg) = buf.message(id) else {
             return (self.chars, self.chars);
         };
-        let (row, parts) = Self::row_text(msg, fmt);
+        let (row, parts) = Self::row_text(msg, buf.reply(id), fmt);
         let (at_char, at_byte, text, start, byte_start) = if self.rows.is_empty() {
             (0, 0, row, 0, 0)
         } else if index == self.rows.len() {
@@ -445,7 +491,7 @@ pub(crate) fn announcement(said: &str, text: &str, kind: &str) -> String {
     {
         return text.to_owned();
     }
-    said.replace("{text}", text).replace("{kind}", kind)
+    fill(said, &[("{text}", text), ("{kind}", kind)])
 }
 
 /// `GtkAccessibleTextGranularity`, without depending on GTK 4.14 to name
@@ -748,6 +794,8 @@ mod tests {
         RowFormat {
             stamp: Box::new(|_| None),
             linkifier: Linkifier::default(),
+            quote: "replying to {nick}: {excerpt}".into(),
+            unavailable: "replying to a message: {text}".into(),
         }
     }
 
@@ -817,7 +865,7 @@ mod tests {
         let b = buffer(&[said("al", "hello")]);
         let fmt = RowFormat {
             stamp: Box::new(|_| Some("[12:00] ".to_string())),
-            linkifier: Linkifier::default(),
+            ..plain()
         };
         let m = TextModel::build(&b, &fmt);
         assert_eq!(m.text(), "[12:00] al: hello");
@@ -882,6 +930,50 @@ mod tests {
             }
             assert_eq!(read, m.text(), "stepping by {g:?} reads everything once");
         }
+    }
+
+    #[test]
+    fn a_reply_reads_after_its_speaker_and_before_what_they_said() {
+        let mut b = buffer(&[said("al", "hello"), said("bo", "hi")]);
+        let id = b.id_at(1).unwrap();
+        let m8 = FixedMeasure::new(8);
+        let quote = Reply::Quote {
+            nick: "al".into(),
+            color: rotulus_layout::ColorRef::Default,
+            excerpt: "hello".into(),
+        };
+        for (reply, want) in [
+            (quote, "al: hello\nbo: replying to al: hello\nhi"),
+            (
+                Reply::Unavailable("deleted".into()),
+                "al: hello\nbo: replying to a message: deleted\nhi",
+            ),
+        ] {
+            b.set_reply(id, Some(reply), &m8);
+            let m = TextModel::build(&b, &plain());
+            assert_eq!(m.text(), want);
+            let body = Caret {
+                message: id,
+                source: LineSource::Block(0),
+                offset: 0,
+            };
+            let at = m.offset_of(&body, &b).unwrap();
+            assert_eq!(m.caret_at(at, &b), Some(body), "the body maps past it");
+        }
+    }
+
+    #[test]
+    fn placeholders_are_filled_in_one_pass() {
+        let r = Reply::Quote {
+            nick: "{excerpt}".into(),
+            color: rotulus_layout::ColorRef::Default,
+            excerpt: "{nick}".into(),
+        };
+        assert_eq!(plain().reply(&r), "replying to {excerpt}: {nick}");
+        assert_eq!(
+            announcement("{text}, {kind}", "{kind}", "link"),
+            "{kind}, link"
+        );
     }
 
     #[test]

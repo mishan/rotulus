@@ -14,6 +14,10 @@ const mark = view.append_message(msg);
 if (mark === null)
     System.exit(1);
 
+if (!view.set_reply(mark, 'carol', Rotulus.COLOR_DEFAULT, 'hello') ||
+    !view.clear_reply(mark))
+    System.exit(1);
+
 const [n, current] = view.search('gjs', false);
 if (n !== 1 || current !== 1) {
     printerr(`search found ${n}, current ${current}`);

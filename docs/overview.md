@@ -37,7 +37,8 @@ for inserting history before it, replacing it, or removing it.
 
 The application answers the view's signals: a link clicked or
 right-clicked, a speaker clicked, a request for older rows, an inline
-image clicked, the selection changing.
+image clicked, a reply's quote clicked, a row right-clicked, the
+selection changing.
 
 ## Using it
 

@@ -133,6 +133,32 @@ GType rotulus_load_direction_get_type (void);
  * The selection was made, changed or cleared.
  */
 
+/**
+ * RotulusView::reply-activated:
+ * @self: the view
+ * @mark: the row whose reply header was clicked
+ *
+ * A primary click on a row's reply header (see
+ * [method@Rotulus.View.set_reply]), for the application to show the
+ * message the row replies to, which it named when it set the header.
+ */
+
+/**
+ * RotulusView::row-menu:
+ * @self: the view
+ * @mark: the row
+ * @x: where the click was, in widget coordinates
+ * @y: where the click was, in widget coordinates
+ *
+ * A secondary click on a message, anywhere but a link or a speaker, which
+ * have menus of their own: for the application's actions on it, such as
+ * replying to it. Not raised on the selection, where the view offers
+ * Copy, nor on a load-more or divider row.
+ *
+ * Returns: %TRUE to say it was handled; otherwise the view pops its own
+ *   Copy / Select All menu
+ */
+
 /* ---- palette ------------------------------------------------------ *
  *
  * A view draws from a palette of ROTULUS_PAL_COLS colors. Slots 0..31
@@ -902,6 +928,83 @@ RotulusMark *rotulus_view_get_last (RotulusView *self);
  * The marker goes with its row rather than moving to a neighbour.
  */
 void rotulus_view_set_marker (RotulusView *self, RotulusMark *mark);
+
+/* ---- replies ------------------------------------------------------ *
+ *
+ * A reply header is a line above a row's body quoting the message it
+ * replies to: the author's nick and a short excerpt, cut to one line, or
+ * the application's words for why the original can't be shown. It is
+ * set on a row after it is appended, and set again as often as needed —
+ * when a quote fetched later arrives, say — without touching the rest of
+ * the row. A replace keeps it, and a row with one starts a group of its
+ * own. It isn't copied with the row's text, nor searched; a screen reader
+ * reads it before the row's body. */
+
+/**
+ * rotulus_view_set_reply:
+ * @self: a view
+ * @mark: the row that replies
+ * @nick: (nullable): the original's author
+ * @color: a palette index for the nick, or %ROTULUS_COLOR_DEFAULT for
+ *   %ROTULUS_PAL_NICK
+ * @excerpt: (nullable): a short plain-text excerpt of the original; the
+ *   view shows what fits on one line
+ *
+ * Gives a row a reply header quoting the message it replies to, or
+ * changes the one it has. A row with a header starts a group of its own.
+ * Each text is kept to its first 300 characters.
+ *
+ * Returns: %FALSE if the row is gone, or if @nick and @excerpt are both
+ *   %NULL
+ */
+gboolean rotulus_view_set_reply (RotulusView *self, RotulusMark *mark,
+                                 const char *nick, int color,
+                                 const char *excerpt);
+
+/**
+ * rotulus_view_set_reply_rgb:
+ * @self: a view
+ * @mark: the row that replies
+ * @nick: (nullable): the original's author
+ * @rgb: the nick's color, as 0xRRGGBB
+ * @excerpt: (nullable): a short plain-text excerpt of the original
+ *
+ * As [method@Rotulus.View.set_reply], with the nick in a color of its own
+ * rather than a palette slot, as %ROTULUS_ATTR_RGB gives a run one.
+ *
+ * Returns: %FALSE if the row is gone, or if @nick and @excerpt are both
+ *   %NULL
+ */
+gboolean rotulus_view_set_reply_rgb (RotulusView *self, RotulusMark *mark,
+                                     const char *nick, guint32 rgb,
+                                     const char *excerpt);
+
+/**
+ * rotulus_view_set_reply_unavailable:
+ * @self: a view
+ * @mark: the row that replies
+ * @text: why the original can't be shown, such as "Not loaded yet" or
+ *   "Message deleted"
+ *
+ * Gives a row a reply header for an original it can't show, or changes
+ * the one it has.
+ *
+ * Returns: %FALSE if the row is gone
+ */
+gboolean rotulus_view_set_reply_unavailable (RotulusView *self,
+                                             RotulusMark *mark,
+                                             const char *text);
+
+/**
+ * rotulus_view_clear_reply:
+ * @self: a view
+ * @mark: a row
+ *
+ * Takes a row's reply header away.
+ *
+ * Returns: %FALSE if the row is gone
+ */
+gboolean rotulus_view_clear_reply (RotulusView *self, RotulusMark *mark);
 
 /* ---- inline media ------------------------------------------------- *
  *

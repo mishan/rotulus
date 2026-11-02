@@ -13,7 +13,7 @@
 //! reason a resize of a large buffer visibly hitches.
 
 use crate::measure::TextMeasure;
-use crate::message::{Block, Message, MessageFlags};
+use crate::message::{Block, Message, MessageFlags, Reply};
 use crate::span::{ParsedText, Span, Style};
 use std::ops::Range;
 
@@ -86,7 +86,57 @@ pub struct LayoutCache {
     /// draw time, because avatars animate and a cached frame would
     /// freeze.
     pub avatar: Option<AvatarBox>,
+    /// The reply header, when the row has one. Boxed, as the layout
+    /// itself is, so a row without one pays a pointer.
+    pub reply: Option<Box<ReplyBox>>,
 }
+
+impl LayoutCache {
+    /// Where the timestamp goes: the top of the row's lines, below the gap
+    /// a reply leaves above them.
+    pub fn stamp_y(&self) -> u32 {
+        self.reply.as_ref().map_or(0, |r| reply_gap(r.height))
+    }
+}
+
+/// The space above a row that replies, for a line `line_h` tall.
+pub(crate) fn reply_gap(line_h: u32) -> u32 {
+    (line_h / 4).max(1)
+}
+
+/// Where a row's reply header goes, in row-local coordinates: a bar, the
+/// quoted nick, then the excerpt, on one line.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ReplyBox {
+    pub x: u32,
+    pub y: u32,
+    /// As far as anything is drawn, so a click lands where something is.
+    pub width: u32,
+    pub height: u32,
+    /// The quoted nick; `None` when the original is unavailable.
+    pub nick: Option<ReplyText>,
+    /// The excerpt, or the unavailable text.
+    pub text: ReplyText,
+}
+
+/// One text of a reply header, cut to fit.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ReplyText {
+    pub x: u32,
+    /// What is drawn, the ellipsis included.
+    pub width: u32,
+    /// How many bytes of the text are drawn.
+    pub len: usize,
+    /// Whether [`ELLIPSIS`] follows them.
+    pub ellipsis: bool,
+}
+
+/// What a cut reply text ends with.
+pub const ELLIPSIS: &str = "\u{2026}";
+
+/// How many characters of a reply's text are kept: more than a line
+/// shows, few enough that shaping it costs little.
+pub const REPLY_TEXT_CAP: usize = 300;
 
 /// A square avatar slot in the gutter, in row-local coordinates.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -153,10 +203,20 @@ pub fn layout_message(
     generation: LayoutGeneration,
     measure: &dyn TextMeasure,
 ) -> LayoutCache {
+    layout_row(msg, None, params, generation, measure)
+}
+
+/// Lay one row out: its message, under the reply header when it has one.
+pub fn layout_row(
+    msg: &Message,
+    reply: Option<&Reply>,
+    params: &LayoutParams,
+    generation: LayoutGeneration,
+    measure: &dyn TextMeasure,
+) -> LayoutCache {
     let metrics = measure.metrics();
     let line_h = metrics.line_height.max(1);
     let mut lines = Vec::new();
-    let mut y = 0u32;
 
     // The gutter is only as wide as this message needs; the buffer
     // reconciles the maximum across rows and re-lays out when it grows.
@@ -210,6 +270,15 @@ pub fn layout_message(
     };
     let body_width = params.width.saturating_sub(body_x).max(line_h);
 
+    // A row that replies starts a little apart from the row above, so
+    // its quote can't be read as the end of that row's message.
+    let top = if reply.is_some() {
+        reply_gap(line_h)
+    } else {
+        0
+    };
+    let mut y = top;
+
     // The gutter is one unwrapped line, always first, carrying the x it
     // is actually drawn at.
     //
@@ -227,7 +296,7 @@ pub fn layout_message(
     let avatar = if avatar_slot > 0 && !grouped {
         msg.speaker.as_ref().map(|s| AvatarBox {
             x: params.stamp_width,
-            y: 0,
+            y: top,
             size: params.avatar_size,
             key: s.key,
         })
@@ -240,6 +309,7 @@ pub fn layout_message(
     // column of their own. Zero in two-column mode, where both live in
     // the gutter column.
     let mut lead = 0u32;
+    let mut gutter_end = 0u32;
     let gutter = msg
         .gutter
         .as_ref()
@@ -255,13 +325,14 @@ pub fn layout_message(
             params.stamp_width
         };
         lines.push(LineBox {
-            y: 0,
+            y: top,
             height: line_h,
             range: 0..g.text.len(),
             source: LineSource::Gutter,
             x: gx,
             width: gw,
         });
+        gutter_end = gx + gw + params.gutter_gap;
         if !params.indent {
             lead = gx + gw + metrics.space_width;
         }
@@ -277,8 +348,36 @@ pub fn layout_message(
     // Either way the first line is left to the stamp and the gutter, which
     // the view draws there; a lead is only ever nonzero because one of
     // them is.
+    let beside = lead;
     if lead > 0 && (!matches!(msg.blocks.first(), Some(Block::Text(_))) || lead > body_width / 2) {
-        y = line_h;
+        y = top + line_h;
+        lead = 0;
+    }
+
+    // The reply header goes on the row's first line, beside the nick: in
+    // the body column, or in one column where the body would have begun.
+    // That line is the row's own, so the quote reads as the start of this
+    // message rather than the end of the one above; the body starts on
+    // the line after it.
+    //
+    // A nick too long for its column runs into the body's, and the header
+    // starts past it. In one column, a nick that leaves the header too
+    // little of its line puts the header on the next, from the edge, as
+    // the body would wrap.
+    let mut reply = reply.map(|r| {
+        let (x, hy) = if params.indent {
+            (body_x.max(gutter_end), top)
+        } else if params.width.saturating_sub(beside) < 4 * line_h {
+            (0, top + line_h)
+        } else {
+            (beside, top)
+        };
+        let mut b = layout_reply(r, x, params.width.saturating_sub(x), line_h, measure);
+        b.y = hy;
+        Box::new(b)
+    });
+    if let Some(r) = &reply {
+        y = r.y + line_h;
         lead = 0;
     }
 
@@ -439,8 +538,10 @@ pub fn layout_message(
         }
     }
 
+    // At least a line, past whatever is already placed: a header alone
+    // may sit on the second.
     if lines.is_empty() {
-        y = line_h;
+        y = y.max(top + line_h);
     }
 
     // Centre the text against the icon when the icon is the taller of
@@ -456,12 +557,15 @@ pub fn layout_message(
     // Done here, on the finished line boxes, so hit-testing and painting
     // move together — the alternative, offsetting only at draw time, is
     // the class of bug where you can see text you cannot select.
-    let text_h = y.max(line_h);
+    let text_h = (y - top).max(line_h);
     let row_h = text_h.max(avatar.map(|a| a.size).unwrap_or(0));
     if row_h > text_h {
         let shift = (row_h - text_h) / 2;
         for l in &mut lines {
             l.y += shift;
+        }
+        if let Some(r) = &mut reply {
+            r.y += shift;
         }
     }
 
@@ -471,10 +575,107 @@ pub fn layout_message(
         // icon overflows into the row below. This is the case the
         // "re-estimate on regroup" fix in ChatBuffer exists for: a head
         // and its continuations now genuinely differ in height.
-        height: row_h,
+        height: top + row_h,
         lines,
         natural_indent: natural_indent.min(params.max_indent),
         avatar,
+        reply,
+    }
+}
+
+/// The header for `r` at `x`, cut to `width`: two spaces' width with the
+/// bar in it, the nick, a space, then the text.
+fn layout_reply(r: &Reply, x: u32, width: u32, line_h: u32, measure: &dyn TextMeasure) -> ReplyBox {
+    let space = measure.metrics().space_width;
+    let style = |attrs| Style {
+        attrs,
+        ..Style::default()
+    };
+    let mut at = 2 * space;
+    let (nick, text) = match r {
+        Reply::Quote { nick, excerpt, .. } => {
+            // At most about half, so some of what they said shows.
+            let n = fit_ellipsized(
+                nick,
+                style(Reply::NICK_ATTRS),
+                x + at,
+                width.saturating_sub(at).min(width / 2),
+                measure,
+            );
+            at += n.width + space;
+            (Some(n), excerpt)
+        }
+        Reply::Unavailable(t) => (None, t),
+    };
+    let text = fit_ellipsized(
+        text,
+        style(r.text_attrs()),
+        x + at,
+        width.saturating_sub(at),
+        measure,
+    );
+    let end = if text.width > 0 {
+        text.x + text.width
+    } else {
+        nick.map_or(text.x, |n| n.x + n.width)
+    };
+    ReplyBox {
+        x,
+        y: 0,
+        // At least a pixel, so focus on it has somewhere to be.
+        width: (end - x).min(width).max(1),
+        height: line_h,
+        nick,
+        text,
+    }
+}
+
+/// As much of `text` as fits in `max` at `x`, with an ellipsis when that
+/// isn't all of it, or nothing when not even the ellipsis fits.
+fn fit_ellipsized(
+    text: &str,
+    style: Style,
+    x: u32,
+    max: u32,
+    measure: &dyn TextMeasure,
+) -> ReplyText {
+    let full = measure.run_width(text, style);
+    if full <= max {
+        return ReplyText {
+            x,
+            width: full,
+            len: text.len(),
+            ellipsis: false,
+        };
+    }
+    let e = measure.run_width(ELLIPSIS, style);
+    let Some(budget) = max.checked_sub(e) else {
+        return ReplyText {
+            x,
+            width: 0,
+            len: 0,
+            ellipsis: false,
+        };
+    };
+    // fit_prefix makes progress past the budget rather than none, which
+    // here would push the ellipsis past the edge.
+    let (mut len, mut w) = measure.fit_prefix(text, style, budget);
+    while w > budget && len > 0 {
+        len = text[..len].char_indices().last().map_or(0, |(i, _)| i);
+        w = measure.run_width(&text[..len], style);
+    }
+    // No space between the last word and the ellipsis.
+    let kept = text[..len].trim_end();
+    let w = if kept.len() == len {
+        w
+    } else {
+        measure.run_width(kept, style)
+    };
+    ReplyText {
+        x,
+        width: w + e,
+        len: kept.len(),
+        ellipsis: true,
     }
 }
 
@@ -783,6 +984,21 @@ pub fn estimate_height(msg: &Message, params: &LayoutParams, measure: &dyn TextM
         0
     };
     text_h.max(avatar_h)
+}
+
+/// [`estimate_height`] for a row, with the line its reply header takes.
+pub fn estimate_row_height(
+    msg: &Message,
+    reply: Option<&Reply>,
+    params: &LayoutParams,
+    measure: &dyn TextMeasure,
+) -> u32 {
+    let line_h = measure.metrics().line_height.max(1);
+    // In one column a long nick can put the header on a line of its own,
+    // which the estimator, measuring no nick, has to assume.
+    let lines = if params.indent { 1 } else { 2 };
+    let header = reply.map_or(0, |_| lines * line_h + reply_gap(line_h));
+    header + estimate_height(msg, params, measure)
 }
 
 /// Whether a message draws in the muted secondary colour.

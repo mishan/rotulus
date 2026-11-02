@@ -273,6 +273,39 @@ fn history_and_marker() -> RotulusView {
     v
 }
 
+/// Give the newest row a reply header through the C ABI: a quote of
+/// `nick`'s message, or with no nick, one whose original is gone.
+fn reply_to_last(view: &RotulusView, nick: Option<(&str, c_int)>, text: &str) {
+    let w = view.upcast_ref::<gtk::Widget>().as_ptr() as *mut _;
+    let text = CString::new(text).unwrap();
+    unsafe {
+        let mark = ffi::rotulus_view_get_last(w);
+        let set = match nick {
+            Some((nick, color)) => {
+                let nick = CString::new(nick).unwrap();
+                ffi::rotulus_view_set_reply(w, mark, nick.as_ptr(), color, text.as_ptr())
+            }
+            None => ffi::rotulus_view_set_reply_unavailable(w, mark, text.as_ptr()),
+        };
+        assert_eq!(set, 1, "the row is there");
+    }
+}
+
+/// Reply headers above their rows, with the stamp and the nick beside the
+/// body below: a quote cut to its line, and one whose original is gone.
+fn replies() -> RotulusView {
+    let v = view();
+    v.set_time_stamp(true);
+    v.set_stamp_format("%H:%M:%S ");
+    let question = "has anyone tried the new build on a slow machine?";
+    say(&v, 1, "alice", question, T);
+    say(&v, 2, "bob", "yes, it is quick", T + 20);
+    reply_to_last(&v, Some(("alice", 48)), question);
+    say(&v, 3, "carol", "same here", T + 40);
+    reply_to_last(&v, None, "Message deleted");
+    v
+}
+
 /// A selection across rows.
 fn selection() -> RotulusView {
     let v = view();
@@ -463,6 +496,7 @@ fn scenes_draw_and_read_as_promised() {
         ("single-column", single_column),
         ("history-and-marker", history_and_marker),
         ("selection", selection),
+        ("replies", replies),
     ]
     .into_iter()
     .filter_map(|(name, scene)| check(name, &render(&scene())))
