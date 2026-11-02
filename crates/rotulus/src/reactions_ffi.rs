@@ -106,7 +106,7 @@ mod tests {
             rotulus_reactions_add(r, c"ok".as_ptr(), 1, 0, std::ptr::null());
             let copy = rotulus_reactions_copy(r);
             rotulus_reactions_free(r);
-            let got = &(*copy).0;
+            let got = &copy.as_ref().expect("a copy").0;
             assert_eq!(
                 got.iter()
                     .map(|r| (r.key.as_str(), r.count, r.mine, r.label.as_deref()))
