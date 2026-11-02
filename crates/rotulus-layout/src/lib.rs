@@ -80,7 +80,7 @@ pub mod wrap;
 mod tests;
 
 pub use anchor::{Gravity, ScrollAnchor};
-pub use buffer::{ChatBuffer, ReplyChange, MIN_INDENT};
+pub use buffer::{ChatBuffer, RowChange, MIN_INDENT, REACTIONS_CAP, REACTION_KEY_CAP};
 pub use focus::FocusItem;
 pub use index::HeightIndex;
 pub use linkify::{Linkifier, DEFAULT_SCHEMES};
@@ -88,12 +88,12 @@ pub use markdown::{scan_delims, SourceSpan};
 pub use measure::{fit_prefix_by_search, FixedMeasure, FontMetrics, TextMeasure};
 pub use message::{
     Block, Blocks, GroupKey, ImageSize, LoadMoreDirection, Message, MessageFlags, MessageId,
-    MessageKind, Reply, Speaker,
+    MessageKind, Reaction, Reply, Speaker,
 };
 pub use search::{find_all, Match, SearchState};
 pub use select::{Caret, RowSelection, Selection};
 pub use span::{Attrs, ColorRef, Link, LinkId, ParsedText, Span, Style};
 pub use wrap::{
-    AvatarBox, LayoutCache, LayoutGeneration, LayoutParams, LineBox, LineSource, ReplyBox,
+    AvatarBox, ChipBox, LayoutCache, LayoutGeneration, LayoutParams, LineBox, LineSource, ReplyBox,
     ReplyText,
 };

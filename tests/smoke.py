@@ -47,6 +47,14 @@ view.emit("reply-activated", first)
 assert view.emit("row-menu", first, 1.0, 2.0)
 assert marked == [True, True], marked
 
+reactions = Rotulus.Reactions.new()
+reactions.add("+1", 3, True, "thumbs up")
+assert view.set_reactions(first, reactions)
+keys = []
+view.connect("reaction-activated", lambda v, mark, key: keys.append((v.set_reactions(mark, None), key)))
+view.emit("reaction-activated", first, "+1")
+assert keys == [(True, "+1")], keys
+
 view.set_property("markdown", True)
 assert view.get_property("markdown")
 view.set_link_schemes(["https://", "irc://"])

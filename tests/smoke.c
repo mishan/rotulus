@@ -77,6 +77,11 @@ main (void)
     g_assert_true (rotulus_view_set_reply_unavailable (view, second, "gone"));
     g_assert_true (rotulus_view_clear_reply (view, second));
 
+    g_autoptr (RotulusReactions) reactions = rotulus_reactions_new ();
+    rotulus_reactions_add (reactions, "+1", 3, TRUE, "thumbs up");
+    g_assert_true (rotulus_view_set_reactions (view, second, reactions));
+    g_assert_true (rotulus_view_set_reactions (view, second, NULL));
+
     g_assert_true (rotulus_view_remove (view, first));
     g_assert_false (rotulus_view_remove (view, first));
     g_assert_false (rotulus_view_set_reply (view, first, "alice",

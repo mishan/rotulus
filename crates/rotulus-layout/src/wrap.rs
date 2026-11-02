@@ -13,7 +13,7 @@
 //! reason a resize of a large buffer visibly hitches.
 
 use crate::measure::TextMeasure;
-use crate::message::{Block, Message, MessageFlags, Reply};
+use crate::message::{Block, Message, MessageFlags, Reaction, Reply};
 use crate::span::{ParsedText, Span, Style};
 use std::ops::Range;
 
@@ -89,6 +89,21 @@ pub struct LayoutCache {
     /// The reply header, when the row has one. Boxed, as the layout
     /// itself is, so a row without one pays a pointer.
     pub reply: Option<Box<ReplyBox>>,
+    /// The reaction chips under the body, in the order given; boxed for
+    /// the same reason.
+    pub chips: Option<Box<[ChipBox]>>,
+}
+
+/// Where a reaction chip goes, in row-local coordinates.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ChipBox {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    /// Where the key's text starts, and the count's after it.
+    pub key_x: u32,
+    pub count_x: u32,
 }
 
 impl LayoutCache {
@@ -137,6 +152,12 @@ pub const ELLIPSIS: &str = "\u{2026}";
 /// How many characters of a reply's text are kept: more than a line
 /// shows, few enough that shaping it costs little.
 pub const REPLY_TEXT_CAP: usize = 300;
+
+/// Pixels between a chip's edge and its text, above and below; and
+/// between the body and the chips, between rows of chips, and under the
+/// last, so the next row's header doesn't touch them.
+const CHIP_PAD_Y: u32 = 2;
+pub(crate) const CHIP_GAP_Y: u32 = 2;
 
 /// A square avatar slot in the gutter, in row-local coordinates.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -203,13 +224,15 @@ pub fn layout_message(
     generation: LayoutGeneration,
     measure: &dyn TextMeasure,
 ) -> LayoutCache {
-    layout_row(msg, None, params, generation, measure)
+    layout_row(msg, None, &[], params, generation, measure)
 }
 
-/// Lay one row out: its message, under the reply header when it has one.
+/// Lay one row out: its message, under the reply header when it has one
+/// and over its reactions.
 pub fn layout_row(
     msg: &Message,
     reply: Option<&Reply>,
+    reactions: &[Reaction],
     params: &LayoutParams,
     generation: LayoutGeneration,
     measure: &dyn TextMeasure,
@@ -544,6 +567,15 @@ pub fn layout_row(
         y = y.max(top + line_h);
     }
 
+    // Under the body, in its column, wrapping as words do; under the
+    // row's first line at least, which a nick has with no body beside it.
+    let mut chips = (!reactions.is_empty()).then(|| {
+        y = y.max(top + line_h);
+        let (boxes, h) = layout_chips(reactions, body_x, y, body_width, line_h, measure);
+        y += h;
+        boxes.into_boxed_slice()
+    });
+
     // Centre the text against the icon when the icon is the taller of
     // the two.
     //
@@ -564,6 +596,9 @@ pub fn layout_row(
         for l in &mut lines {
             l.y += shift;
         }
+        for c in chips.iter_mut().flat_map(|c| c.iter_mut()) {
+            c.y += shift;
+        }
         if let Some(r) = &mut reply {
             r.y += shift;
         }
@@ -580,7 +615,48 @@ pub fn layout_row(
         natural_indent: natural_indent.min(params.max_indent),
         avatar,
         reply,
+        chips,
     }
+}
+
+/// Chips for `reactions` from `(x, y)` in `width`, each starting a new
+/// line when it doesn't fit beside the last, and the height they take,
+/// the gaps above and below them included. A chip wider than the line overflows it
+/// rather than being cut: its key is the reaction.
+fn layout_chips(
+    reactions: &[Reaction],
+    x: u32,
+    y: u32,
+    width: u32,
+    line_h: u32,
+    measure: &dyn TextMeasure,
+) -> (Vec<ChipBox>, u32) {
+    let space = measure.metrics().space_width;
+    let height = line_h + 2 * CHIP_PAD_Y;
+    let top = y + CHIP_GAP_Y;
+    let (mut cx, mut cy) = (x, top);
+    let mut out = Vec::with_capacity(reactions.len());
+    for r in reactions {
+        let key_w = measure.run_width(&r.key, Style::default());
+        let count_w = match r.count {
+            0 => 0,
+            n => space + measure.run_width(&n.to_string(), Style::default()),
+        };
+        let w = space + key_w + count_w + space;
+        if cx > x && cx + w > x + width {
+            (cx, cy) = (x, cy + height + CHIP_GAP_Y);
+        }
+        out.push(ChipBox {
+            x: cx,
+            y: cy,
+            width: w,
+            height,
+            key_x: cx + space,
+            count_x: cx + space + key_w + space,
+        });
+        cx += w + space / 2;
+    }
+    (out, cy + height + CHIP_GAP_Y - y)
 }
 
 /// The header for `r` at `x`, cut to `width`: two spaces' width with the
@@ -990,6 +1066,7 @@ pub fn estimate_height(msg: &Message, params: &LayoutParams, measure: &dyn TextM
 pub fn estimate_row_height(
     msg: &Message,
     reply: Option<&Reply>,
+    reactions: &[Reaction],
     params: &LayoutParams,
     measure: &dyn TextMeasure,
 ) -> u32 {
@@ -998,7 +1075,20 @@ pub fn estimate_row_height(
     // which the estimator, measuring no nick, has to assume.
     let lines = if params.indent { 1 } else { 2 };
     let header = reply.map_or(0, |_| lines * line_h + reply_gap(line_h));
-    header + estimate_height(msg, params, measure)
+    // Laid out for real: few rows have chips, and wrapping them takes a
+    // measure per chip, so the estimate can be exact rather than crude.
+    let chips = if reactions.is_empty() {
+        0
+    } else {
+        let x = if params.indent {
+            params.indent_width
+        } else {
+            0
+        };
+        let width = params.width.saturating_sub(x).max(line_h);
+        layout_chips(reactions, x, 0, width, line_h, measure).1
+    };
+    header + estimate_height(msg, params, measure) + chips
 }
 
 /// Whether a message draws in the muted secondary colour.

@@ -4006,7 +4006,7 @@ fn focus_steps_through_items_in_reading_order_and_off_the_ends() {
 
 // ----------------------------------------------------------------- replies
 
-use crate::buffer::ReplyChange;
+use crate::buffer::RowChange;
 use crate::message::Reply;
 use crate::wrap::{estimate_row_height, layout_row, REPLY_TEXT_CAP};
 
@@ -4029,7 +4029,7 @@ fn a_reply_header_goes_beside_the_nick_and_the_body_below_it() {
     let msg = nick_row("al", "hello");
     let gen = LayoutGeneration::default();
     let plain = layout_message(&msg, &p, gen, &m);
-    let l = layout_row(&msg, Some(&quote("bo", "hi")), &p, gen, &m);
+    let l = layout_row(&msg, Some(&quote("bo", "hi")), &[], &p, gen, &m);
     let r = **l.reply.as_ref().expect("a header");
     let (gutter, body) = (&l.lines[0], &l.lines[1]);
     assert_eq!(gutter.source, LineSource::Gutter);
@@ -4065,6 +4065,7 @@ fn in_one_column_the_header_goes_where_the_body_would_have_begun() {
     let l = layout_row(
         &nick_row("al", "hello"),
         Some(&quote("bo", "hi")),
+        &[],
         &p,
         LayoutGeneration::default(),
         &m,
@@ -4105,6 +4106,7 @@ fn a_header_is_cut_to_its_line_with_an_ellipsis() {
         let l = layout_row(
             &Message::system(ParsedText::plain("body")),
             Some(&reply),
+            &[],
             &params(width),
             LayoutGeneration::default(),
             &m,
@@ -4139,8 +4141,8 @@ fn a_header_is_never_under_estimated() {
     for p in [two, one] {
         for msg in [nick_row("al", "hi"), nick_row("someone", "a\nb\nc")] {
             for reply in [quote("bo", "hi"), Reply::Unavailable("gone".into())] {
-                let real = layout_row(&msg, Some(&reply), &p, LayoutGeneration::default(), &m);
-                let est = estimate_row_height(&msg, Some(&reply), &p, &m);
+                let real = layout_row(&msg, Some(&reply), &[], &p, LayoutGeneration::default(), &m);
+                let est = estimate_row_height(&msg, Some(&reply), &[], &p, &m);
                 assert!(est >= real.height, "estimated {est} below {}", real.height);
             }
         }
@@ -4157,13 +4159,13 @@ fn a_reply_set_later_grows_its_row_and_outlives_an_edit() {
     let before = b.layout_at(1).unwrap().height;
     assert_eq!(
         b.set_reply(id, Some(quote("al", "one")), &m),
-        ReplyChange::Changed
+        RowChange::Changed
     );
     assert!(b.layout_at(1).is_none(), "the old layout is stale");
     assert_eq!(b.ensure_layout(1, &m), before + 20);
     assert_eq!(
         b.set_reply(id, Some(quote("al", "one")), &m),
-        ReplyChange::Unchanged
+        RowChange::Unchanged
     );
     assert!(
         b.layout_at(1).is_some(),
@@ -4172,7 +4174,7 @@ fn a_reply_set_later_grows_its_row_and_outlives_an_edit() {
     assert!(b.replace(id, nick_row("bo", "two, edited"), &m));
     assert_eq!(b.reply(id), Some(&quote("al", "one")), "an edit keeps it");
     assert_eq!(b.ensure_layout(1, &m), before + 20);
-    assert_eq!(b.set_reply(id, None, &m), ReplyChange::Changed);
+    assert_eq!(b.set_reply(id, None, &m), RowChange::Changed);
     assert_eq!(b.ensure_layout(1, &m), before);
 }
 
@@ -4194,7 +4196,7 @@ fn a_reply_goes_with_its_row() {
         assert_eq!(b.reply(id), None, "{how}: a stale mark has no reply");
         assert_eq!(
             b.set_reply(id, Some(quote("bo", "hi")), &m),
-            ReplyChange::Gone,
+            RowChange::Gone,
             "{how}: and takes none"
         );
     }
@@ -4343,6 +4345,7 @@ fn a_prefix_that_overshoots_its_budget_is_cut_back_not_dropped() {
     let l = layout_row(
         &Message::system(ParsedText::plain("body")),
         Some(&Reply::Unavailable("abcdefghijklmnop".into())),
+        &[],
         &params(80),
         LayoutGeneration::default(),
         &Overshoot(FixedMeasure::new(8)),
@@ -4350,6 +4353,233 @@ fn a_prefix_that_overshoots_its_budget_is_cut_back_not_dropped() {
     let t = l.reply.unwrap().text;
     // 80px less the bar's 16 is 64: seven characters and the ellipsis.
     assert_eq!((t.len, t.width, t.ellipsis), (7, 64, true));
+}
+
+// --------------------------------------------------------------- reactions
+
+use crate::message::Reaction;
+
+fn react(key: &str, count: u32, mine: bool) -> Reaction {
+    Reaction {
+        key: key.into(),
+        count,
+        mine,
+        label: None,
+    }
+}
+
+#[test]
+fn chips_wrap_under_the_body_in_its_column() {
+    // 8px characters at 100px: a "+1 3" chip is 8 + 16 + 8 + 8 + 8 = 48
+    // wide, two fit with the 4px between them, and the third wraps.
+    let m = FixedMeasure::new(8);
+    let chips = [
+        react("+1", 3, false),
+        react("ok", 3, true),
+        react("no", 0, false),
+    ];
+    let msg = Message::system(ParsedText::plain("body"));
+    let l = layout_row(
+        &msg,
+        None,
+        &chips,
+        &params(100),
+        LayoutGeneration::default(),
+        &m,
+    );
+    let c = l.chips.as_deref().expect("chips");
+    let at: Vec<_> = c.iter().map(|c| (c.x, c.y, c.width, c.height)).collect();
+    assert_eq!(at, [(0, 18, 48, 20), (52, 18, 48, 20), (0, 40, 32, 20)]);
+    assert_eq!(
+        (c[0].key_x, c[0].count_x),
+        (8, 32),
+        "the key, then its count"
+    );
+    assert_eq!(l.height, 62, "the body's line, two rows of chips, a gap");
+    assert_eq!(l.lines[0].y, 0, "the body doesn't move");
+
+    let mut p = params(400);
+    p.indent = true;
+    p.indent_width = 80;
+    let l = layout_row(
+        &nick_row("al", "hi"),
+        Some(&quote("bo", "hi")),
+        &chips,
+        &p,
+        LayoutGeneration::default(),
+        &m,
+    );
+    let c = l.chips.as_deref().unwrap();
+    assert_eq!(
+        (c[0].x, c[0].y),
+        (80, 38),
+        "in the body column, under the gap, the header's line and the body"
+    );
+    assert_eq!(l.height, 60);
+}
+
+#[test]
+fn chips_are_never_under_estimated() {
+    let m = FixedMeasure::new(10);
+    let chips: Vec<_> = (0..9)
+        .map(|i| react(&"x".repeat(i), i as u32, false))
+        .collect();
+    let mut two = params(400);
+    two.indent = true;
+    two.indent_width = 80;
+    two.avatar_size = 32;
+    for p in [two, params(60), params(400)] {
+        for msg in [nick_row("al", "hi"), nick_row("someone", "a\nb\nc")] {
+            let real = layout_row(&msg, None, &chips[1..], &p, LayoutGeneration::default(), &m);
+            let est = estimate_row_height(&msg, None, &chips[1..], &p, &m);
+            assert!(est >= real.height, "estimated {est} below {}", real.height);
+        }
+    }
+}
+
+#[test]
+fn reactions_set_later_grow_the_row_and_resending_changes_nothing() {
+    let m = FixedMeasure::new(8);
+    let mut b = ChatBuffer::new(params(400));
+    let id = b.append(nick_row("al", "one"), &m);
+    let before = b.ensure_layout(0, &m);
+    let chips = vec![react("+1", 2, true)];
+    assert_eq!(b.set_reactions(id, chips.clone(), &m), RowChange::Changed);
+    assert_eq!(b.ensure_layout(0, &m), before + 24);
+    assert_eq!(b.set_reactions(id, chips, &m), RowChange::Unchanged);
+    assert!(b.layout_at(0).is_some(), "the measured row is kept");
+    assert!(b.replace(id, nick_row("al", "edited"), &m));
+    assert_eq!(
+        b.reactions_of(id),
+        [react("+1", 2, true)],
+        "an edit keeps them"
+    );
+    assert_eq!(b.set_reactions(id, Vec::new(), &m), RowChange::Changed);
+    assert_eq!(b.ensure_layout(0, &m), before);
+    b.set_reactions(id, vec![react("+1", 1, false)], &m);
+    let load_more = Message {
+        kind: crate::message::MessageKind::LoadMore(crate::message::LoadMoreDirection::Older),
+        ..Message::system(ParsedText::plain("load older"))
+    };
+    assert!(b.replace(id, load_more, &m));
+    assert!(
+        b.reactions_of(id).is_empty(),
+        "a row replaced by a load-more row drops what it can't take"
+    );
+    let more = b.append(
+        Message {
+            kind: crate::message::MessageKind::LoadMore(crate::message::LoadMoreDirection::Older),
+            ..Message::system(ParsedText::plain("load older"))
+        },
+        &m,
+    );
+    assert_eq!(
+        b.set_reactions(more, vec![react("+1", 1, false)], &m),
+        RowChange::Gone,
+        "a load-more row is a button, which focus couldn't reach chips on"
+    );
+    assert!(b.reactions_of(more).is_empty());
+    for how in ["remove", "trim", "clear"] {
+        let mut b = ChatBuffer::new(params(400));
+        let id = b.append(nick_row("al", "one"), &m);
+        b.set_reactions(id, vec![react("+1", 1, false)], &m);
+        match how {
+            "remove" => assert!(b.remove(id, &m)),
+            "trim" => {
+                b.set_max_rows(1, &m);
+                b.append(nick_row("bo", "two"), &m);
+            }
+            _ => b.clear(),
+        }
+        assert!(b.reactions_of(id).is_empty(), "{how}: they go with the row");
+        assert_eq!(
+            b.set_reactions(id, vec![react("+1", 1, false)], &m),
+            RowChange::Gone
+        );
+    }
+}
+
+#[test]
+fn reactions_the_view_cant_show_or_tell_apart_are_dropped() {
+    let m = FixedMeasure::new(8);
+    let mut b = ChatBuffer::new(params(400));
+    let id = b.append(nick_row("al", "one"), &m);
+    let too_long = "x".repeat(crate::buffer::REACTION_KEY_CAP + 1);
+    let mut labeled = react("ok", 1, false);
+    labeled.label = Some("o\nk".into());
+    b.set_reactions(
+        id,
+        vec![
+            react("", 1, false),
+            react(&too_long, 1, false),
+            react("a\nb", 1, false),
+            react("a\u{2028}b", 1, false),
+            react("+1", 1, false),
+            react("+1", 9, true),
+            labeled,
+        ],
+        &m,
+    );
+    let mut want_label = react("ok", 1, false);
+    want_label.label = Some("o k".into());
+    assert_eq!(b.reactions_of(id), [react("+1", 1, false), want_label]);
+    let many: Vec<_> = (0..crate::buffer::REACTIONS_CAP + 5)
+        .map(|i| react(&i.to_string(), 1, false))
+        .collect();
+    b.set_reactions(id, many, &m);
+    assert_eq!(b.reactions_of(id).len(), crate::buffer::REACTIONS_CAP);
+}
+
+#[test]
+fn a_point_on_a_chip_finds_it_and_between_chips_finds_nothing_else() {
+    let m = FixedMeasure::new(8);
+    let mut b = ChatBuffer::new(params(400));
+    let id = b.append(nick_row("al", "one"), &m);
+    b.set_reactions(id, vec![react("+1", 3, false), react("ok", 1, true)], &m);
+    b.ensure_visible(0, 200, &m);
+    let c = b.layout_at(0).unwrap().chips.as_deref().unwrap().to_vec();
+    let mid = |c: &crate::wrap::ChipBox| ((c.x + 1) as i32, u64::from(c.y + 1));
+    assert_eq!(b.chip_at(mid(&c[0]).0, mid(&c[0]).1), Some((id, Some(0))));
+    assert_eq!(b.chip_at(mid(&c[1]).0, mid(&c[1]).1), Some((id, Some(1))));
+    let gap = (c[0].x + c[0].width + 1) as i32;
+    assert_eq!(b.chip_at(gap, u64::from(c[0].y + 1)), Some((id, None)));
+    for y in [c[0].y - 1, c[0].y + c[0].height] {
+        assert_eq!(
+            b.chip_at(1, u64::from(y)),
+            Some((id, None)),
+            "the padding above and below them, at {y}"
+        );
+    }
+    assert_eq!(b.chip_at(1, 1), None, "the body's line");
+    let sel = b.select_row(0).unwrap();
+    assert_eq!(b.selected_text(&sel), "<al> one", "copying leaves them out");
+    assert!(b.search("ok", false).is_empty(), "and so does search");
+}
+
+#[test]
+fn chips_are_the_last_things_focus_reaches_on_their_row() {
+    let m = FixedMeasure::new(8);
+    let mut p = params(400);
+    p.indent = true;
+    let mut b = ChatBuffer::new(p);
+    let id = b.append(nick_row("al", "see https://example.com"), &m);
+    let plain = b.focus_items(0);
+    b.set_reactions(id, vec![react("+1", 3, false), react("ok", 1, true)], &m);
+    let items = b.focus_items(0);
+    assert_eq!(items[..plain.len()], plain[..]);
+    assert_eq!(
+        items[plain.len()..],
+        [
+            crate::focus::FocusItem::Reaction {
+                message: id,
+                index: 0
+            },
+            crate::focus::FocusItem::Reaction {
+                message: id,
+                index: 1
+            },
+        ]
+    );
 }
 
 #[test]
@@ -4363,6 +4593,7 @@ fn a_header_clears_a_nick_too_long_for_its_column() {
     let l = layout_row(
         &nick_row("someone_long", "hi"),
         Some(&quote("bo", "hi")),
+        &[],
         &p,
         LayoutGeneration::default(),
         &m,
@@ -4380,6 +4611,7 @@ fn in_one_column_a_nick_that_leaves_no_room_puts_the_header_below_it() {
     let l = layout_row(
         &msg,
         Some(&quote("bo", "hi")),
+        &[],
         &p,
         LayoutGeneration::default(),
         &m,
@@ -4395,11 +4627,12 @@ fn in_one_column_a_nick_that_leaves_no_room_puts_the_header_below_it() {
         let real = layout_row(
             &msg,
             Some(&quote("bo", "hi")),
+            &[],
             &p,
             LayoutGeneration::default(),
             &m,
         );
-        let est = estimate_row_height(&msg, Some(&quote("bo", "hi")), &p, &m);
+        let est = estimate_row_height(&msg, Some(&quote("bo", "hi")), &[], &p, &m);
         assert!(est >= real.height, "estimated {est} below {}", real.height);
     }
 }
@@ -4464,7 +4697,7 @@ fn a_load_more_row_takes_no_reply() {
     assert_eq!(b.reply(id), None, "replaced by one, a row drops its reply");
     assert_eq!(
         b.set_reply(id, Some(quote("bo", "hi")), &m),
-        ReplyChange::Gone,
+        RowChange::Gone,
         "and is given none"
     );
 }
@@ -4482,6 +4715,7 @@ fn a_header_alone_on_its_row_is_all_inside_it() {
     let l = layout_row(
         &msg,
         Some(&quote("bo", "hi")),
+        &[],
         &p,
         LayoutGeneration::default(),
         &m,
@@ -4493,5 +4727,24 @@ fn a_header_alone_on_its_row_is_all_inside_it() {
         "{} ends above the header",
         l.height
     );
-    assert!(estimate_row_height(&msg, Some(&quote("bo", "hi")), &p, &m) >= l.height);
+    assert!(estimate_row_height(&msg, Some(&quote("bo", "hi")), &[], &p, &m) >= l.height);
+}
+
+#[test]
+fn chips_under_a_nick_with_no_body_go_below_its_line() {
+    let m = FixedMeasure::new(8);
+    let mut p = params(400);
+    p.indent = true;
+    p.indent_width = 80;
+    let msg = Message {
+        blocks: crate::message::Blocks::new(Vec::new()),
+        ..nick_row("al", "")
+    };
+    let chips = [react("+1", 1, false)];
+    let l = layout_row(&msg, None, &chips, &p, LayoutGeneration::default(), &m);
+    assert_eq!(l.lines[0].source, LineSource::Gutter);
+    let c = l.chips.as_deref().unwrap()[0];
+    assert_eq!(c.y, 18, "below the nick's line, not beside it");
+    assert_eq!(l.height, 16 + 2 + 20 + 2);
+    assert!(estimate_row_height(&msg, None, &chips, &p, &m) >= l.height);
 }

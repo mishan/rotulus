@@ -159,6 +159,17 @@ GType rotulus_load_direction_get_type (void);
  *   Copy / Select All menu
  */
 
+/**
+ * RotulusView::reaction-activated:
+ * @self: the view
+ * @mark: the row whose reaction chip was clicked
+ * @key: the chip's key, as the application gave it
+ *
+ * A primary click on a reaction chip (see
+ * [method@Rotulus.View.set_reactions]), for the application to add or
+ * take back the reader's own.
+ */
+
 /* ---- palette ------------------------------------------------------ *
  *
  * A view draws from a palette of ROTULUS_PAL_COLS colors. Slots 0..31
@@ -1005,6 +1016,83 @@ gboolean rotulus_view_set_reply_unavailable (RotulusView *self,
  * Returns: %FALSE if the row is gone
  */
 gboolean rotulus_view_clear_reply (RotulusView *self, RotulusMark *mark);
+
+/* ---- reactions ---------------------------------------------------- *
+ *
+ * A row's reactions are chips under its body, wrapping as words do: each
+ * a key (an emoji) and how many made it, highlighted when one of them is
+ * the reader's. They are set on a row after it is appended, all at once,
+ * as often as needed, without touching the rest of the row; setting what
+ * a row already has changes nothing. A replace keeps them. They aren't
+ * copied with the row's text, nor searched; a screen reader reads them
+ * after the row's body. */
+
+/**
+ * RotulusReactions:
+ *
+ * A row's reactions under construction. Build one, hand it to
+ * [method@Rotulus.View.set_reactions], and free it; the view copies what
+ * it needs.
+ */
+typedef struct _RotulusReactions RotulusReactions;
+
+#define ROTULUS_TYPE_REACTIONS (rotulus_reactions_get_type ())
+GType rotulus_reactions_get_type (void);
+
+/**
+ * rotulus_reactions_new:
+ *
+ * Returns: (transfer full): no reactions yet
+ */
+RotulusReactions *rotulus_reactions_new (void);
+
+/**
+ * rotulus_reactions_copy:
+ * @self: reactions
+ *
+ * Returns: (transfer full): a copy of @self
+ */
+RotulusReactions *rotulus_reactions_copy (const RotulusReactions *self);
+
+/**
+ * rotulus_reactions_free:
+ * @self: (transfer full): reactions
+ */
+void rotulus_reactions_free (RotulusReactions *self);
+
+/**
+ * rotulus_reactions_add:
+ * @self: reactions
+ * @key: the reaction, drawn as text and handed back by
+ *   [signal@Rotulus.View::reaction-activated]; at most 32 code points
+ * @count: how many made it; 0 shows the key alone
+ * @mine: whether one of them is the reader's
+ * @label: (nullable): what a screen reader calls it, such as "thumbs up";
+ *   %NULL reads the key
+ *
+ * Adds a chip after those already added. A %NULL key, or one that isn't
+ * UTF-8, is left out now, since the key is the reaction's identity and
+ * comes back as it was given; a label that isn't is read with its bad
+ * bytes replaced. A key that is empty, too long, holds a line break, or
+ * repeats an earlier one is left out when the reactions are set, and so
+ * is any past the 64th.
+ */
+void rotulus_reactions_add (RotulusReactions *self, const char *key,
+                            guint count, gboolean mine, const char *label);
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (RotulusReactions, rotulus_reactions_free)
+
+/**
+ * rotulus_view_set_reactions:
+ * @self: a view
+ * @mark: a row
+ * @reactions: (nullable): its reactions; %NULL or none takes them away
+ *
+ * Returns: %FALSE if the row is gone, or is a load-more row, which takes
+ *   no reactions
+ */
+gboolean rotulus_view_set_reactions (RotulusView *self, RotulusMark *mark,
+                                     const RotulusReactions *reactions);
 
 /* ---- inline media ------------------------------------------------- *
  *

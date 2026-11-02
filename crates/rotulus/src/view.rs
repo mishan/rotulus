@@ -21,7 +21,7 @@ use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
 use rotulus_layout::{
     Caret, ChatBuffer, ColorRef, FocusItem, LayoutParams, LineSource, Message, MessageId,
-    ParsedText, Reply, RowSelection, Selection, Span, Style, TextMeasure, MIN_INDENT,
+    ParsedText, Reaction, Reply, RowSelection, Selection, Span, Style, TextMeasure, MIN_INDENT,
 };
 
 use crate::measure::PangoMeasure;
@@ -201,6 +201,12 @@ pub(crate) enum HoverTarget {
     Media { message: MessageId, token: u32 },
     /// A row's reply header.
     Reply { message: MessageId },
+    /// A reaction chip: its row, its place there, and its key.
+    Reaction {
+        message: MessageId,
+        index: usize,
+        key: String,
+    },
 }
 
 impl HoverTarget {
@@ -211,7 +217,8 @@ impl HoverTarget {
             | HoverTarget::Nick { message, .. }
             | HoverTarget::LoadMore { message, .. }
             | HoverTarget::Media { message, .. }
-            | HoverTarget::Reply { message } => *message,
+            | HoverTarget::Reply { message }
+            | HoverTarget::Reaction { message, .. } => *message,
         }
     }
 
@@ -230,7 +237,8 @@ impl HoverTarget {
             HoverTarget::Nick { .. }
             | HoverTarget::LoadMore { .. }
             | HoverTarget::Media { .. }
-            | HoverTarget::Reply { .. } => None,
+            | HoverTarget::Reply { .. }
+            | HoverTarget::Reaction { .. } => None,
         }
     }
 }
@@ -617,6 +625,11 @@ pub(crate) mod imp {
                         .run_last()
                         .accumulator(first_handled)
                         .build(),
+                    // (mark, key) — a primary click on a reaction chip, with
+                    // the key the application gave it.
+                    glib::subclass::Signal::builder("reaction-activated")
+                        .param_types([RowMark::static_type(), String::static_type()])
+                        .build(),
                 ]
             })
         }
@@ -1000,6 +1013,20 @@ impl RotulusView {
             // original; {text} is the application's reason, such as
             // "Message deleted".
             unavailable: crate::trc("accessible reply", "replying to a message: {text}"),
+            // Translators: how a screen reader reads one reaction to a
+            // message: its name, such as "thumbs up", and how many made it.
+            reaction: crate::trc("accessible reaction", "{label}, {count}"),
+            // Translators: the same, when one of them is the reader's own.
+            reaction_mine: crate::trc("accessible reaction", "{label}, {count}, including you"),
+            // Translators: a reaction the application gives no count, and
+            // the same when it is the reader's own.
+            reaction_bare: crate::trc("accessible reaction", "{label}"),
+            reaction_bare_mine: crate::trc("accessible reaction", "{label}, including you"),
+            // Translators: what goes between reactions in the list below.
+            reaction_separator: crate::trc("accessible reaction", "; "),
+            // Translators: a message's reactions, read after it; {list} is
+            // each reaction as above, separated by semicolons.
+            reactions: crate::trc("accessible reaction", "reactions: {list}"),
         }
     }
 
@@ -1473,7 +1500,7 @@ impl RotulusView {
     /// rest of the row: how a quote fetched after its reply arrives gets on
     /// screen. Returns `false` when the row is gone.
     pub fn set_reply(&self, id: MessageId, reply: Option<Reply>) -> bool {
-        use rotulus_layout::ReplyChange;
+        use rotulus_layout::RowChange;
         let imp = self.imp_();
         let items = |buf: &rotulus_layout::ChatBuffer| {
             buf.row_of(id)
@@ -1491,7 +1518,7 @@ impl RotulusView {
             let m = imp.measure.borrow();
             imp.buffer.borrow_mut().set_reply(id, reply, &*m)
         };
-        if change == ReplyChange::Changed {
+        if change == RowChange::Changed {
             // A focused stop that went — the header, or the speaker of a row
             // that regrouped without it — moves on to the first stop after
             // it that is still there, or else to the row's first, rather
@@ -1512,7 +1539,47 @@ impl RotulusView {
             self.after_content_change();
             self.a11y_replaced(id);
         }
-        change != ReplyChange::Gone
+        change != RowChange::Gone
+    }
+
+    /// Set the reactions shown under the row `id` names, keeping the rest
+    /// of the row; none takes them away. Returns `false` when the row is
+    /// gone.
+    pub fn set_reactions(&self, id: MessageId, reactions: Vec<Reaction>) -> bool {
+        use rotulus_layout::RowChange;
+        let imp = self.imp_();
+        // Focus is on a reaction, not on a place in the list.
+        let focused = match *imp.focus_item.borrow() {
+            Some(FocusItem::Reaction { message, index }) if message == id => imp
+                .buffer
+                .borrow()
+                .reactions_of(id)
+                .get(index)
+                .map(|r| r.key.clone()),
+            _ => None,
+        };
+        let change = {
+            let m = imp.measure.borrow();
+            imp.buffer.borrow_mut().set_reactions(id, reactions, &*m)
+        };
+        if change == RowChange::Changed {
+            // What the pointer was over may be gone or somewhere else.
+            imp.hovered.borrow_mut().take_if(|h| h.message() == id);
+            if let Some(key) = focused {
+                let buf = imp.buffer.borrow();
+                let item = match buf.reactions_of(id).iter().position(|r| r.key == key) {
+                    Some(index) => Some(FocusItem::Reaction { message: id, index }),
+                    // It went: what is left of its row, from the end.
+                    None => buf
+                        .row_of(id)
+                        .and_then(|r| buf.focus_items(r).into_iter().next_back()),
+                };
+                imp.focus_item.replace(item);
+            }
+            self.after_content_change();
+            self.a11y_replaced(id);
+        }
+        change != RowChange::Gone
     }
 
     pub fn append(&self, msg: Message) -> MessageId {
@@ -2011,6 +2078,24 @@ impl RotulusView {
                 }
             }
 
+            if let (Some(chips), Some(id)) = (layout.chips.as_deref(), buf.id_at(row)) {
+                let hovered = match &*imp.hovered.borrow() {
+                    Some(HoverTarget::Reaction { message, index, .. }) if *message == id => {
+                        Some(*index)
+                    }
+                    _ => None,
+                };
+                self.draw_chips(
+                    snapshot,
+                    &draw_layout,
+                    buf.reactions_of(id),
+                    chips,
+                    row_top,
+                    hovered,
+                    legibility,
+                );
+            }
+
             for line in &layout.lines {
                 let y = row_top + i64::from(line.y);
                 if y + i64::from(line.height) < 0 || y > i64::from(height) {
@@ -2156,6 +2241,58 @@ impl RotulusView {
         }
 
         snapshot.restore();
+    }
+
+    /// Reaction chips: a rounded box each, tinted with the selection's
+    /// color for the reader's own, then the key and its count.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_chips(
+        &self,
+        snapshot: &gtk4::Snapshot,
+        layout: &pango::Layout,
+        reactions: &[Reaction],
+        chips: &[rotulus_layout::ChipBox],
+        row_top: i64,
+        hovered: Option<usize>,
+        legibility: Legibility,
+    ) {
+        let fg = self.pal(PAL_FG);
+        let accent = self.pal(PAL_MARK_BG);
+        let tint =
+            |c: gtk4::gdk::RGBA, a: f32| gtk4::gdk::RGBA::new(c.red(), c.green(), c.blue(), a);
+        let line_h = self.imp_().measure.borrow().metrics().line_height;
+        layout.set_attributes(None);
+        for (i, (r, c)) in reactions.iter().zip(chips).enumerate() {
+            let y = (row_top + i64::from(c.y)) as f32;
+            let rect = gtk4::graphene::Rect::new(c.x as f32, y, c.width as f32, c.height as f32);
+            let rounded = gtk4::gsk::RoundedRect::from_rect(rect, c.height as f32 / 2.0);
+            // Hovered, the fill deepens and the edge goes solid; the
+            // reader's own, whose edge is solid already, shows it in the fill.
+            let (fill, edge) = match (r.mine, hovered == Some(i)) {
+                (true, false) => (tint(accent, 0.25), tint(accent, 1.0)),
+                (true, true) => (tint(accent, 0.45), tint(accent, 1.0)),
+                (false, false) => (tint(fg, CODE_BG_ALPHA), tint(fg, CODE_BORDER_ALPHA)),
+                (false, true) => (tint(fg, CODE_BG_ALPHA * 2.0), tint(fg, 1.0)),
+            };
+            snapshot.push_rounded_clip(&rounded);
+            snapshot.append_color(&fill, &rect);
+            snapshot.pop();
+            snapshot.append_border(&rounded, &[1.0; 4], &[edge; 4]);
+            let ink = legibility.ink(fg, Some(&fill));
+            let ty = y + c.height.saturating_sub(line_h) as f32 / 2.0;
+            let count = (r.count > 0).then(|| r.count.to_string());
+            for (x, text) in [
+                (c.key_x, Some(r.key.as_str())),
+                (c.count_x, count.as_deref()),
+            ] {
+                let Some(text) = text else { continue };
+                layout.set_text(text);
+                snapshot.save();
+                snapshot.translate(&gtk4::graphene::Point::new(x as f32, ty));
+                snapshot.append_layout(layout, &ink);
+                snapshot.restore();
+            }
+        }
     }
 
     /// A reply header: a bar in the muted color, then the nick and the
@@ -3558,6 +3695,21 @@ impl RotulusView {
                 Some((_, false)) => return None,
                 None => {}
             }
+            // So are the chips, and between them is nothing too.
+            let chip = imp.buffer.borrow_mut().chip_at(cx, cy);
+            match chip {
+                Some((message, Some(index))) => {
+                    let buf = imp.buffer.borrow();
+                    let key = buf.reactions_of(message).get(index)?.key.clone();
+                    return Some(HoverTarget::Reaction {
+                        message,
+                        index,
+                        key,
+                    });
+                }
+                Some((_, None)) => return None,
+                None => {}
+            }
         }
 
         let caret = self.caret_at(x, y)?;
@@ -3643,6 +3795,9 @@ impl RotulusView {
             Some(HoverTarget::Reply { message }) => {
                 self.emit_by_name::<()>("reply-activated", &[&RowMark(message)]);
             }
+            Some(HoverTarget::Reaction { message, key, .. }) => {
+                self.emit_by_name::<()>("reaction-activated", &[&RowMark(message), &key]);
+            }
             None => {}
         }
     }
@@ -3673,7 +3828,10 @@ impl RotulusView {
             // A right-click on the selection is about it: Copy.
             ref t
                 if at_pointer
-                    && !matches!(t, Some(HoverTarget::Reply { .. }))
+                    && !matches!(
+                        t,
+                        Some(HoverTarget::Reply { .. } | HoverTarget::Reaction { .. })
+                    )
                     && self.in_selection(x, y) =>
             {
                 self.show_context_menu(x, y)
@@ -4166,10 +4324,39 @@ impl RotulusView {
         imp.focus_item.replace(item.clone());
         if let Some(item) = item {
             let height = content_height(self.height());
+            let (shown_top, shown_bottom) = (PAD_Y as f32, (PAD_Y + height as i32) as f32);
+            let span = |boxes: Vec<gtk4::graphene::Rect>| {
+                boxes.iter().fold((f32::MAX, f32::MIN), |(t, b), r| {
+                    (t.min(r.y()), b.max(r.y() + r.height()))
+                })
+            };
+            // An item already in sight stays where it is, though its row
+            // may not be: revealing a tall row would jump to its top.
+            let (top, bottom) = span(self.item_boxes(&item));
+            if top >= shown_top && bottom <= shown_bottom {
+                self.announce_item(&item);
+                self.queue_draw();
+                return;
+            }
             let m = imp.measure.borrow();
             imp.buffer.borrow_mut().reveal(item.message(), height, &*m);
             drop(m);
             self.sync_adjustment(height);
+            // A row taller than the view is revealed from its top, which
+            // can leave the item itself, a chip under a long message, out
+            // of sight.
+            let (top, bottom) = span(self.item_boxes(&item));
+            let delta = if bottom > shown_bottom && top > shown_top {
+                (bottom - shown_bottom).min(top - shown_top)
+            } else if top < shown_top && top <= bottom {
+                top - shown_top
+            } else {
+                0.0
+            };
+            if delta != 0.0 {
+                let scroll = imp.buffer.borrow_mut().scroll_offset(height);
+                self.scroll_absolute(scroll.saturating_add_signed(delta.round() as i64), height);
+            }
             self.announce_item(&item);
         }
         self.queue_draw();
@@ -4220,6 +4407,18 @@ impl RotulusView {
                     };
                     (at(LineSource::Block(*block), 0), alt)
                 }
+                FocusItem::Reaction { message, index } => {
+                    let Some(r) = buf.reactions_of(*message).get(*index) else {
+                        return;
+                    };
+                    let last = LineSource::Block(msg.blocks.len().saturating_sub(1));
+                    let end = buf
+                        .row_of(*message)
+                        .and_then(|row| buf.source_text(row, last))
+                        .map_or(0, str::len);
+                    (at(last, end), self.a11y_format().reaction(r))
+                }
+                _ => return,
             }
         };
         let kind = match item {
@@ -4234,6 +4433,8 @@ impl RotulusView {
             FocusItem::Link { .. } => crate::trc("accessible role", "link"),
             FocusItem::LoadMore { .. } => crate::trc("accessible role", "button"),
             FocusItem::Image { .. } => crate::trc("accessible role", "image"),
+            FocusItem::Reaction { .. } => crate::trc("accessible role", "button"),
+            _ => return,
         };
         self.a11y_move_caret(Some(Selection::new(caret, caret)));
         // Translators: what a screen reader says when keyboard focus lands
@@ -4299,6 +4500,12 @@ impl RotulusView {
                 },
                 _ => return None,
             },
+            FocusItem::Reaction { message, index } => HoverTarget::Reaction {
+                message: *message,
+                index: *index,
+                key: buf.reactions_of(*message).get(*index)?.key.clone(),
+            },
+            _ => return None,
         })
     }
 
@@ -4391,6 +4598,12 @@ impl RotulusView {
                     out.push(rect(l.x, l.y, w, l.height));
                 }
             }
+            FocusItem::Reaction { index, .. } => {
+                if let Some(c) = layout.chips.as_deref().and_then(|c| c.get(*index)) {
+                    out.push(rect(c.x, c.y, c.width, c.height));
+                }
+            }
+            _ => {}
         }
         out
     }

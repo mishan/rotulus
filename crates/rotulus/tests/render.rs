@@ -306,6 +306,52 @@ fn replies() -> RotulusView {
     v
 }
 
+/// Reaction chips under their rows through the C ABI, wrapping, one of
+/// them the reader's, under a reply.
+fn reactions() -> RotulusView {
+    let v = view();
+    v.set_time_stamp(true);
+    v.set_stamp_format("%H:%M ");
+    say(&v, 1, "alice", "the new build is out", T);
+    set_reactions(&v, &[("+1", 3, true), ("ok", 1, false), ("wow", 12, false)]);
+    say(&v, 2, "bob", "trying it now", T + 20);
+    reply_to_last(&v, Some(("alice", 48)), "the new build is out");
+    set_reactions(
+        &v,
+        &[
+            ("<3", 1, false),
+            ("party", 2, true),
+            ("eyes", 4, false),
+            ("rocket", 7, false),
+            ("100", 1, false),
+        ],
+    );
+    v
+}
+
+fn set_reactions(view: &RotulusView, chips: &[(&str, u32, bool)]) {
+    use rotulus::reactions_ffi as rf;
+    let w = view.upcast_ref::<gtk::Widget>().as_ptr() as *mut _;
+    unsafe {
+        let r = rf::rotulus_reactions_new();
+        for (key, count, mine) in chips {
+            let key = CString::new(*key).unwrap();
+            rf::rotulus_reactions_add(
+                r,
+                key.as_ptr(),
+                *count,
+                c_int::from(*mine),
+                std::ptr::null(),
+            );
+        }
+        assert_eq!(
+            rf::rotulus_view_set_reactions(w, ffi::rotulus_view_get_last(w), r),
+            1
+        );
+        rf::rotulus_reactions_free(r);
+    }
+}
+
 /// A selection across rows.
 fn selection() -> RotulusView {
     let v = view();
@@ -497,6 +543,7 @@ fn scenes_draw_and_read_as_promised() {
         ("history-and-marker", history_and_marker),
         ("selection", selection),
         ("replies", replies),
+        ("reactions", reactions),
     ]
     .into_iter()
     .filter_map(|(name, scene)| check(name, &render(&scene())))

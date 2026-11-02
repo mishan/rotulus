@@ -491,6 +491,7 @@ fn gtk_class_and_construction_smoke() {
             c"selection-changed",
             c"reply-activated",
             c"row-menu",
+            c"reaction-activated",
         ] {
             let id =
                 gtk4::glib::gobject_ffi::g_signal_lookup(name.as_ptr() as *const _, t.into_glib());
@@ -823,6 +824,7 @@ fn gtk_class_and_construction_smoke() {
     check_offscreen_animation_stops();
     check_typed_signals();
     check_replies();
+    check_reactions();
     check_replace_and_marker();
     check_text_scale_remeasures();
     check_keyboard_focus();
@@ -1712,6 +1714,228 @@ fn check_replies() {
     view.clear_selection();
     assert!(view.remove(id));
     assert!(!view.set_reply(id, None), "a stale mark sets nothing");
+    window.destroy();
+}
+
+/// Reaction chips reach the application as `reaction-activated` with the
+/// row's mark and the chip's key, from the pointer and the keyboard;
+/// between chips is nothing, and a chip's menu is its row's.
+fn check_reactions() {
+    use crate::view::{HoverTarget, RowMark};
+    use rotulus_layout::{FocusItem, Reaction};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let react = |key: &str, count, mine| Reaction {
+        key: key.into(),
+        count,
+        mine,
+        label: None,
+    };
+    let view = crate::view::RotulusView::new();
+    view.set_indent(true);
+    // A link under the chips' band, which the caret hit-test would answer
+    // a point between them with.
+    let id = view.append(message_row(7, "al", "see https://example.com/a/long/path"));
+    assert!(view.set_reactions(id, vec![react("+1", 3, true), react("ok", 1, false)]));
+    let holder = laid_out(&view);
+    let window = gtk4::Window::new();
+    window.set_child(Some(&holder));
+    holder.allocate(400, 300, -1, None);
+
+    let seen: Rc<RefCell<Vec<String>>> = Rc::default();
+    {
+        let seen = seen.clone();
+        view.connect_closure(
+            "reaction-activated",
+            false,
+            gtk4::glib::closure_local!(move |_: crate::view::RotulusView,
+                                             m: RowMark,
+                                             key: String| {
+                seen.borrow_mut().push(format!("{} {key}", m.0 .0));
+            }),
+        );
+    }
+    {
+        let seen = seen.clone();
+        view.connect_closure(
+            "row-menu",
+            false,
+            gtk4::glib::closure_local!(move |_: crate::view::RotulusView,
+                                             m: RowMark,
+                                             _x: f64,
+                                             _y: f64|
+                  -> bool {
+                seen.borrow_mut().push(format!("row {}", m.0 .0));
+                true
+            }),
+        );
+    }
+    let chip = |i: usize| {
+        find_point(
+            &view,
+            0,
+            |t| matches!(t, HoverTarget::Reaction { index, .. } if *index == i),
+        )
+        .expect("the chip is hittable")
+    };
+    let (first, second) = (chip(0), chip(1));
+    view.activate_at(first.0, first.1);
+    view.activate_at(second.0, second.1);
+    view.open_menu_at(second.0, second.1);
+    let between = {
+        let buf = view.imp_ref().buffer.borrow();
+        let c = buf.layout_at(0).unwrap().chips.as_deref().unwrap()[0];
+        f64::from(crate::view::PAD_X) + f64::from(c.x + c.width) + 1.0
+    };
+    assert_eq!(
+        view.hover_target_at(between, first.1),
+        None,
+        "between chips"
+    );
+    // The padding above the chips is theirs too, not the link above it.
+    let (over_link, padding) = {
+        let mut buf = view.imp_ref().buffer.borrow_mut();
+        let top = f64::from(crate::view::PAD_Y) + buf.index_mut().offset_of(0) as f64;
+        let l = buf.layout_at(0).unwrap();
+        let body = l
+            .lines
+            .iter()
+            .rfind(|l| l.source == rotulus_layout::LineSource::Block(0))
+            .unwrap();
+        let c = l.chips.as_deref().unwrap()[0];
+        let x = f64::from(crate::view::PAD_X) + f64::from(body.x + body.width) - 4.0;
+        (
+            (x, top + f64::from(body.y) + 2.0),
+            (x, top + f64::from(c.y) - 1.0),
+        )
+    };
+    assert!(matches!(
+        view.hover_target_at(over_link.0, over_link.1),
+        Some(HoverTarget::Link { .. })
+    ));
+    assert_eq!(
+        view.hover_target_at(padding.0, padding.1),
+        None,
+        "the chips' padding"
+    );
+    let n = id.0;
+    assert_eq!(
+        *seen.borrow(),
+        [format!("{n} +1"), format!("{n} ok"), format!("row {n}")]
+    );
+
+    // From the keyboard: the chips are the row's last stops, and Enter is
+    // a click on one.
+    assert!(view.child_focus(gtk4::DirectionType::TabForward));
+    while !matches!(
+        *view.imp_ref().focus_item.borrow(),
+        Some(FocusItem::Reaction { index: 1, .. })
+    ) {
+        assert!(view.child_focus(gtk4::DirectionType::TabForward));
+    }
+    let item = view.imp_ref().focus_item.borrow().clone().unwrap();
+    assert!(!view.item_boxes(&item).is_empty(), "it has a ring to draw");
+    seen.borrow_mut().clear();
+    assert!(view.activate_focused());
+    assert_eq!(*seen.borrow(), [format!("{n} ok")]);
+
+    // Focus stays on its reaction when the ones before it go.
+    assert!(view.set_reactions(
+        id,
+        vec![
+            react("+1", 3, true),
+            react("ok", 1, false),
+            react("eyes", 2, false)
+        ]
+    ));
+    assert_eq!(
+        *view.imp_ref().focus_item.borrow(),
+        Some(FocusItem::Reaction {
+            message: id,
+            index: 1
+        })
+    );
+    assert!(view.set_reactions(id, vec![react("ok", 1, false), react("eyes", 2, false)]));
+    assert_eq!(
+        *view.imp_ref().focus_item.borrow(),
+        Some(FocusItem::Reaction {
+            message: id,
+            index: 0
+        }),
+        "still ok, not eyes"
+    );
+    assert!(view.set_reactions(id, vec![react("+1", 3, true), react("ok", 1, false)]));
+    let _holder = laid_out(&view);
+
+    // A focused chip that goes leaves focus on what is left of its row,
+    // and the pointer's chip is forgotten, since it may be another now.
+    view.imp_ref()
+        .hovered
+        .replace(view.hover_target_at(second.0, second.1));
+    assert!(view.imp_ref().hovered.borrow().is_some());
+    assert!(view.set_reactions(id, vec![react("+1", 3, true)]));
+    assert_eq!(*view.imp_ref().hovered.borrow(), None);
+    assert_eq!(
+        *view.imp_ref().focus_item.borrow(),
+        Some(FocusItem::Reaction {
+            message: id,
+            index: 0
+        })
+    );
+    assert!(view.set_reactions(id, Vec::new()));
+    let _holder = laid_out(&view);
+    assert!(find_point(&view, 0, |t| matches!(t, HoverTarget::Reaction { .. })).is_none());
+    assert!(view.remove(id));
+    assert!(
+        !view.set_reactions(id, Vec::new()),
+        "a stale mark sets nothing"
+    );
+
+    // Tab to a chip under a message taller than the view scrolls the chip,
+    // not just its row's top, into sight.
+    let tall = (0..40)
+        .map(|i| match i {
+            33 => "see https://example.com/mid".to_string(),
+            i => format!("line {i}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let tall = view.insert_before(None, message_row(7, "al", &tall));
+    assert!(view.set_reactions(tall, vec![react("+1", 3, false)]));
+    let _holder = laid_out(&view);
+    view.scroll_to_extreme(false);
+    let _holder = laid_out(&view);
+    assert!(view.grab_focus());
+    view.imp_ref().focus_item.replace(None);
+    while !matches!(
+        *view.imp_ref().focus_item.borrow(),
+        Some(FocusItem::Reaction { message, .. }) if message == tall
+    ) {
+        assert!(
+            view.child_focus(gtk4::DirectionType::TabForward),
+            "Tab reaches the chip"
+        );
+    }
+    let item = view.imp_ref().focus_item.borrow().clone().unwrap();
+    let _holder = laid_out(&view);
+    let boxes = view.item_boxes(&item);
+    assert!(
+        boxes
+            .iter()
+            .all(|r| r.y() >= 0.0 && r.y() + r.height() <= 300.0),
+        "the chip is on screen: {boxes:?}"
+    );
+    // Back to a link already in sight in the same tall row: nothing moves,
+    // where revealing the row would jump to its top.
+    let scroll = |v: &crate::view::RotulusView| v.vadjustment().unwrap().value();
+    let before = scroll(&view);
+    assert!(view.child_focus(gtk4::DirectionType::TabBackward));
+    assert!(matches!(
+        *view.imp_ref().focus_item.borrow(),
+        Some(FocusItem::Link { message, .. }) if message == tall
+    ));
+    assert_eq!(scroll(&view), before, "an item in sight stays put");
     window.destroy();
 }
 

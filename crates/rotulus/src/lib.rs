@@ -21,6 +21,7 @@ pub mod measure;
 pub mod message_ffi;
 #[cfg(feature = "mirc")]
 pub mod mirc_ffi;
+pub mod reactions_ffi;
 pub mod view;
 
 /// The gettext domain the widget's own strings live in.

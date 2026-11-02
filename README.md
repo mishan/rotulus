@@ -34,7 +34,7 @@ Rotulus is not 1.0 yet, and its API may still change.
   - copy that includes or leaves out timestamps
   - search and zoom
   - inline images
-  - reply headers quoting the original
+  - reply headers quoting the original, and reaction chips
   - markdown code and quote blocks
   - a last-read marker line
   - a single-column mode for logs
@@ -62,8 +62,9 @@ The full tables, including 200,000 messages, are in
 
 ## What it isn't
 
-- **Not a widget per message.** It has no reaction buttons or thread
-  expanders inside rows. An application that needs them wants GtkListView.
+- **Not a widget per message.** Reply headers and reaction chips are
+  drawn, like the rest of a row; there are no widgets inside rows, and no
+  thread expanders. An application that needs those wants GtkListView.
 - **Not an editor.** The view is read-only.
 - **Not a terminal.** It has no cursor addressing and no VT escapes; that's
   VTE's job.
@@ -138,7 +139,7 @@ through signals:
 - `speaker-activated`, `speaker-menu`
 - `load-more`
 - `media-activated`
-- `reply-activated`, `row-menu`
+- `reply-activated`, `reaction-activated`, `row-menu`
 - `selection-changed`
 
 The API reference for C and the language bindings is at
