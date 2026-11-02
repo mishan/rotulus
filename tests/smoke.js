@@ -18,6 +18,11 @@ if (!view.set_reply(mark, 'carol', Rotulus.COLOR_DEFAULT, 'hello') ||
     !view.clear_reply(mark))
     System.exit(1);
 
+const reactions = Rotulus.Reactions.new();
+reactions.add('+1', 3, true, null);
+if (!view.set_reactions(mark, reactions))
+    System.exit(1);
+
 const [n, current] = view.search('gjs', false);
 if (n !== 1 || current !== 1) {
     printerr(`search found ${n}, current ${current}`);

@@ -23,7 +23,7 @@
 // still built, so those tests run in every configuration.
 #![cfg_attr(not(feature = "v4_14"), allow(dead_code))]
 
-use rotulus_layout::{Block, Caret, ChatBuffer, LineSource, Linkifier, MessageId, Reply};
+use rotulus_layout::{Block, Caret, ChatBuffer, LineSource, Linkifier, MessageId, Reaction, Reply};
 
 /// Where one of a row's texts sits in the row's line.
 #[derive(Debug, Clone)]
@@ -73,6 +73,15 @@ pub(crate) struct RowFormat {
     /// `{text}` when the original is unavailable.
     pub(crate) quote: String,
     pub(crate) unavailable: String,
+    /// How a reaction reads, with `{label}` and `{count}`, the reader's own
+    /// and not; and a row's reactions, with `{list}`.
+    pub(crate) reaction: String,
+    pub(crate) reaction_mine: String,
+    /// The same for a chip drawn without a count.
+    pub(crate) reaction_bare: String,
+    pub(crate) reaction_bare_mine: String,
+    pub(crate) reaction_separator: String,
+    pub(crate) reactions: String,
 }
 
 impl RowFormat {
@@ -84,6 +93,21 @@ impl RowFormat {
             }
             Reply::Unavailable(t) => fill(&self.unavailable, &[("{text}", t)]),
         }
+    }
+
+    /// A reaction, as read aloud.
+    pub(crate) fn reaction(&self, r: &Reaction) -> String {
+        let template = match (r.count, r.mine) {
+            (0, false) => &self.reaction_bare,
+            (0, true) => &self.reaction_bare_mine,
+            (_, false) => &self.reaction,
+            (_, true) => &self.reaction_mine,
+        };
+        let label = r.label.as_deref().unwrap_or(&r.key);
+        fill(
+            template,
+            &[("{label}", label), ("{count}", &r.count.to_string())],
+        )
     }
 }
 
@@ -132,6 +156,7 @@ impl TextModel {
     fn row_text(
         msg: &rotulus_layout::Message,
         reply: Option<&Reply>,
+        reactions: &[Reaction],
         fmt: &RowFormat,
     ) -> (String, Vec<Part>) {
         let mut row = String::new();
@@ -209,6 +234,13 @@ impl TextModel {
                 verbatim: true,
             });
         }
+        // After what they reacted to, on a line of their own.
+        if !reactions.is_empty() {
+            let list: Vec<String> = reactions.iter().map(|r| fmt.reaction(r)).collect();
+            row.push('\n');
+            let list = list.join(&fmt.reaction_separator);
+            row.push_str(&fill(&fmt.reactions, &[("{list}", &list)]));
+        }
         (row, parts)
     }
 
@@ -235,7 +267,7 @@ impl TextModel {
         let Some(msg) = buf.message(id) else {
             return (self.chars, self.chars);
         };
-        let (row, parts) = Self::row_text(msg, buf.reply(id), fmt);
+        let (row, parts) = Self::row_text(msg, buf.reply(id), buf.reactions_of(id), fmt);
         let (at_char, at_byte, text, start, byte_start) = if self.rows.is_empty() {
             (0, 0, row, 0, 0)
         } else if index == self.rows.len() {
@@ -796,6 +828,12 @@ mod tests {
             linkifier: Linkifier::default(),
             quote: "replying to {nick}: {excerpt}".into(),
             unavailable: "replying to a message: {text}".into(),
+            reaction: "{label}, {count}".into(),
+            reaction_mine: "{label}, {count}, including you".into(),
+            reaction_bare: "{label}".into(),
+            reaction_bare_mine: "{label}, including you".into(),
+            reaction_separator: "; ".into(),
+            reactions: "reactions: {list}".into(),
         }
     }
 
@@ -960,6 +998,49 @@ mod tests {
             let at = m.offset_of(&body, &b).unwrap();
             assert_eq!(m.caret_at(at, &b), Some(body), "the body maps past it");
         }
+    }
+
+    #[test]
+    fn reactions_read_after_what_they_react_to() {
+        let mut b = buffer(&[said("al", "hello")]);
+        let id = b.id_at(0).unwrap();
+        let thumbs = Reaction {
+            key: "+1".into(),
+            count: 3,
+            mine: true,
+            label: Some("thumbs up".into()),
+        };
+        let ok = Reaction {
+            key: "ok".into(),
+            count: 1,
+            mine: false,
+            label: None,
+        };
+        let bare = |mine| Reaction {
+            key: "*".into(),
+            count: 0,
+            mine,
+            label: Some("star".into()),
+        };
+        let unbare = Reaction {
+            key: "!".into(),
+            ..bare(false)
+        };
+        b.set_reactions(
+            id,
+            vec![thumbs, ok, bare(true), unbare],
+            &FixedMeasure::new(8),
+        );
+        let fmt = RowFormat {
+            reaction_separator: " | ".into(),
+            ..plain()
+        };
+        assert_eq!(
+            TextModel::build(&b, &fmt).text(),
+            "al: hello\nreactions: thumbs up, 3, including you | ok, 1 | \
+             star, including you | star",
+            "a count it isn't drawn with isn't read either"
+        );
     }
 
     #[test]

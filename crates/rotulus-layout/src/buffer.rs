@@ -12,7 +12,7 @@
 use crate::anchor::{AnchorResolver, Gravity, ScrollAnchor};
 use crate::index::HeightIndex;
 use crate::measure::TextMeasure;
-use crate::message::{Block, Message, MessageFlags, MessageId, MessageKind, Reply};
+use crate::message::{Block, Message, MessageFlags, MessageId, MessageKind, Reaction, Reply};
 use crate::select::{Caret, RowSelection, Selection};
 use crate::span::Style;
 use crate::wrap::LineSource;
@@ -45,14 +45,42 @@ struct Row {
     layout: Option<Box<LayoutCache>>,
 }
 
-/// What [`ChatBuffer::set_reply`] did.
+/// What [`ChatBuffer::set_reply`] or [`ChatBuffer::set_reactions`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReplyChange {
+pub enum RowChange {
     /// The row is gone; nothing was set.
     Gone,
-    /// The row already had that header.
+    /// The row already had that.
     Unchanged,
     Changed,
+}
+
+/// How many reactions a row shows; the rest are dropped.
+pub const REACTIONS_CAP: usize = 64;
+
+/// How many code points a reaction's key may have. One that has more is
+/// dropped rather than cut, since the key is the reaction's identity.
+pub const REACTION_KEY_CAP: usize = 32;
+
+/// `t` on one line, as a reply header or a reaction's label is shown and
+/// read, and cut at [`REPLY_TEXT_CAP`] characters.
+fn one_line(t: String) -> String {
+    // Only what is kept is copied, so a short text holds no more than it
+    // shows, whatever it was cut from.
+    let mut t: String = t
+        .chars()
+        .take(REPLY_TEXT_CAP + 1)
+        .map(|c| match c {
+            c if c.is_control() => ' ',
+            '\u{2028}' | '\u{2029}' => ' ',
+            c => c,
+        })
+        .collect();
+    if let Some((cut, _)) = t.char_indices().nth(REPLY_TEXT_CAP) {
+        t.truncate(cut);
+        t.push_str(ELLIPSIS);
+    }
+    t
 }
 
 /// A scrollable list of laid-out messages.
@@ -95,6 +123,8 @@ pub struct ChatBuffer {
     /// Reply headers, by row. Beside the rows rather than in them, since
     /// few rows have one and a field would cost every row its size.
     replies: HashMap<MessageId, Reply>,
+    /// Reactions, by row, beside the rows for the same reason.
+    reactions: HashMap<MessageId, Vec<Reaction>>,
 
     params: LayoutParams,
     generation: LayoutGeneration,
@@ -140,6 +170,7 @@ impl ChatBuffer {
             pos_dirty: false,
             hints: [None; 2],
             replies: HashMap::new(),
+            reactions: HashMap::new(),
             params,
             generation,
             anchor: ScrollAnchor::bottom(),
@@ -323,6 +354,7 @@ impl ChatBuffer {
         }
         self.rows.remove(row);
         self.replies.remove(&id);
+        self.reactions.remove(&id);
         self.index.remove(row);
         self.pos_dirty = true;
         self.forget_hint(row);
@@ -349,11 +381,19 @@ impl ChatBuffer {
         let Some(row) = self.row_of(id) else {
             return false;
         };
-        // A load-more row takes no reply, so it drops the one it had.
+        // A load-more row takes no reply or reactions, so it drops those it
+        // had.
         if let MessageKind::LoadMore(_) = msg.kind {
             self.replies.remove(&id);
+            self.reactions.remove(&id);
         }
-        let h = estimate_row_height(&msg, self.replies.get(&id), &self.layout_params(), measure);
+        let h = estimate_row_height(
+            &msg,
+            self.replies.get(&id),
+            self.reactions_of(id),
+            &self.layout_params(),
+            measure,
+        );
         let was = self.rows[row].msg.kind.is_history();
         let now = msg.kind.is_history();
         self.rows[row].msg = msg;
@@ -413,7 +453,7 @@ impl ChatBuffer {
     }
 
     /// Set or clear the reply header of the row `id` names. A load-more
-    /// row takes none, as [`ReplyChange::Gone`]: it is a button, not a
+    /// row takes none, as [`RowChange::Gone`]: it is a button, not a
     /// message.
     ///
     /// Control characters and line and paragraph separators in its texts
@@ -426,30 +466,12 @@ impl ChatBuffer {
         id: MessageId,
         reply: Option<Reply>,
         measure: &dyn TextMeasure,
-    ) -> ReplyChange {
+    ) -> RowChange {
         let Some(row) = self.locate(id) else {
-            return ReplyChange::Gone;
+            return RowChange::Gone;
         };
         if let MessageKind::LoadMore(_) = self.rows[row].msg.kind {
-            return ReplyChange::Gone;
-        }
-        let one_line = |t: String| {
-            // Only what is kept is copied, so a short header holds no more
-            // than it shows, whatever it was cut from.
-            let mut t: String = t
-                .chars()
-                .take(REPLY_TEXT_CAP + 1)
-                .map(|c| match c {
-                    c if c.is_control() => ' ',
-                    '\u{2028}' | '\u{2029}' => ' ',
-                    c => c,
-                })
-                .collect();
-            if let Some((cut, _)) = t.char_indices().nth(REPLY_TEXT_CAP) {
-                t.truncate(cut);
-                t.push_str(ELLIPSIS);
-            }
-            t
+            return RowChange::Gone;
         };
         let reply = reply.map(|r| match r {
             Reply::Quote {
@@ -465,7 +487,7 @@ impl ChatBuffer {
         });
         // Setting what is there already keeps the row's measured height.
         if self.replies.get(&id) == reply.as_ref() {
-            return ReplyChange::Unchanged;
+            return RowChange::Unchanged;
         }
         match reply {
             Some(r) => self.replies.insert(id, r),
@@ -473,7 +495,7 @@ impl ChatBuffer {
         };
         self.estimate_again(row, measure);
         self.regroup_rows(row..row + 1, measure);
-        ReplyChange::Changed
+        RowChange::Changed
     }
 
     /// The reply header of the row `id` names, if it has one.
@@ -481,12 +503,65 @@ impl ChatBuffer {
         self.replies.get(&id)
     }
 
+    /// Set the reactions of the row `id` names; none clears them. A
+    /// load-more row takes none, as [`RowChange::Gone`]: it is a button,
+    /// not a message.
+    ///
+    /// A reaction whose key is empty, longer than [`REACTION_KEY_CAP`]
+    /// code points, holds a control character or a line or paragraph
+    /// separator, or repeats an earlier one's, is dropped, and so is
+    /// any past [`REACTIONS_CAP`]. A label is kept to one line of
+    /// [`REPLY_TEXT_CAP`] characters, as a reply's text is.
+    pub fn set_reactions(
+        &mut self,
+        id: MessageId,
+        reactions: Vec<Reaction>,
+        measure: &dyn TextMeasure,
+    ) -> RowChange {
+        let Some(row) = self.locate(id) else {
+            return RowChange::Gone;
+        };
+        if let MessageKind::LoadMore(_) = self.rows[row].msg.kind {
+            return RowChange::Gone;
+        }
+        let mut kept: Vec<Reaction> = Vec::new();
+        for mut r in reactions {
+            let breaks = |c: char| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}');
+            if kept.len() == REACTIONS_CAP
+                || r.key.is_empty()
+                || r.key.chars().nth(REACTION_KEY_CAP).is_some()
+                || r.key.contains(breaks)
+                || kept.iter().any(|k| k.key == r.key)
+            {
+                continue;
+            }
+            r.label = r.label.map(one_line);
+            kept.push(r);
+        }
+        if self.reactions_of(id) == kept.as_slice() {
+            return RowChange::Unchanged;
+        }
+        if kept.is_empty() {
+            self.reactions.remove(&id);
+        } else {
+            self.reactions.insert(id, kept);
+        }
+        self.estimate_again(row, measure);
+        RowChange::Changed
+    }
+
+    /// The reactions of the row `id` names, none when it has none.
+    pub fn reactions_of(&self, id: MessageId) -> &[Reaction] {
+        self.reactions.get(&id).map_or(&[], Vec::as_slice)
+    }
+
     /// Drop `row`'s layout and estimate its height afresh.
     fn estimate_again(&mut self, row: usize, measure: &dyn TextMeasure) {
         let params = self.layout_params();
         let r = &mut self.rows[row];
         r.layout = None;
-        let h = estimate_row_height(&r.msg, self.replies.get(&r.id), &params, measure);
+        let reactions = self.reactions.get(&r.id).map_or(&[][..], Vec::as_slice);
+        let h = estimate_row_height(&r.msg, self.replies.get(&r.id), reactions, &params, measure);
         self.index.set_height(row, h, false);
     }
 
@@ -511,6 +586,7 @@ impl ChatBuffer {
         self.pos_dirty = false;
         self.hints = [None; 2];
         self.replies.clear();
+        self.reactions.clear();
         self.history_rows = 0;
         self.anchor = ScrollAnchor::bottom();
         self.reset_indent();
@@ -547,6 +623,7 @@ impl ChatBuffer {
                         self.pos.remove(&row.id);
                     }
                     self.replies.remove(&row.id);
+                    self.reactions.remove(&row.id);
                 }
             }
             self.index.drain_front(front);
@@ -794,8 +871,10 @@ impl ChatBuffer {
                 return l.height;
             }
         }
-        let reply = self.replies.get(&self.rows[row].id);
-        let layout = layout_row(&self.rows[row].msg, reply, &params, gen, measure);
+        let id = self.rows[row].id;
+        let reply = self.replies.get(&id);
+        let reactions = self.reactions.get(&id).map_or(&[][..], Vec::as_slice);
+        let layout = layout_row(&self.rows[row].msg, reply, reactions, &params, gen, measure);
 
         // A wider nick than any seen so far widens the shared gutter, so
         // every *other* row's layout is stale. Rare — it settles within
@@ -813,7 +892,7 @@ impl ChatBuffer {
             }
             self.index.invalidate_all_measurements();
             params.indent_width = self.indent_width;
-            let layout = layout_row(&self.rows[row].msg, reply, &params, gen, measure);
+            let layout = layout_row(&self.rows[row].msg, reply, reactions, &params, gen, measure);
             let height = layout.height;
             self.rows[row].layout = Some(Box::new(layout));
             self.index.set_height(row, height, true);
@@ -1144,6 +1223,29 @@ impl ChatBuffer {
             return None;
         }
         Some((row.id, x < (r.x + r.width) as i32))
+    }
+
+    /// The row whose chips' band, their padding included, holds content
+    /// point `(x, y)`, and the index of the chip under it, if one is;
+    /// between chips, `None`, for the same reason as [`Self::reply_at`].
+    pub fn chip_at(&mut self, x: i32, y: u64) -> Option<(MessageId, Option<usize>)> {
+        let hit = self.index.locate(y)?;
+        let row = self.rows.get(hit.row)?;
+        let chips = row.layout.as_ref()?.chips.as_ref()?;
+        // The footer's padding too, or a point there would fall through to
+        // the body's last line and whatever link or image is on it.
+        let gap = crate::wrap::CHIP_GAP_Y;
+        let top = chips.first()?.y.saturating_sub(gap);
+        let bottom = chips.last()?.y + chips.last()?.height + gap;
+        if hit.offset < top || hit.offset >= bottom {
+            return None;
+        }
+        let (x, y) = (x as i64, hit.offset as i64);
+        let on = chips.iter().position(|c| {
+            (c.x as i64..(c.x + c.width) as i64).contains(&x)
+                && (c.y as i64..(c.y + c.height) as i64).contains(&y)
+        });
+        Some((row.id, on))
     }
 
     /// A selection covering the whole buffer, or `None` when empty.

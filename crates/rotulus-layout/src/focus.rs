@@ -2,9 +2,9 @@
 //!
 //! The view draws a transcript, not widgets, so Tab has nothing of GTK's
 //! to move between. These are the things a click does something to — a
-//! speaker, a reply header, a link, a load-more row, an image — in reading
-//! order, so that the keyboard reaches each of them, in the order they are
-//! read, and nothing else.
+//! speaker, a reply header, a link, a load-more row, an image, a reaction
+//! — in reading order, so that the keyboard reaches each of them, in the
+//! order they are read, and nothing else.
 
 use std::ops::Range;
 
@@ -14,6 +14,7 @@ use crate::wrap::LineSource;
 
 /// One thing in the scrollback that does something when activated.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FocusItem {
     /// A row's reply header.
     Reply { message: MessageId },
@@ -29,6 +30,8 @@ pub enum FocusItem {
     LoadMore { message: MessageId },
     /// An inline image, or the placeholder standing in for one.
     Image { message: MessageId, block: usize },
+    /// A reaction chip, by its place under the row.
+    Reaction { message: MessageId, index: usize },
 }
 
 impl FocusItem {
@@ -39,15 +42,16 @@ impl FocusItem {
             | FocusItem::Speaker { message }
             | FocusItem::Link { message, .. }
             | FocusItem::LoadMore { message }
-            | FocusItem::Image { message, .. } => *message,
+            | FocusItem::Image { message, .. }
+            | FocusItem::Reaction { message, .. } => *message,
         }
     }
 }
 
 impl ChatBuffer {
     /// A row's items, in reading order: the speaker, the reply header,
-    /// then each block's links or image in turn. A load-more row is one
-    /// item, whatever it says.
+    /// each block's links or image in turn, then the reaction chips. A
+    /// load-more row is one item, whatever it says.
     pub fn focus_items(&self, row: usize) -> Vec<FocusItem> {
         let (Some(message), Some(msg)) = (self.id_at(row), self.message_at(row)) else {
             return Vec::new();
@@ -83,6 +87,10 @@ impl ChatBuffer {
                 range,
             }));
         }
+        out.extend(
+            (0..self.reactions_of(message).len())
+                .map(|index| FocusItem::Reaction { message, index }),
+        );
         out
     }
 

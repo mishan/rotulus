@@ -555,9 +555,10 @@ take it as `row-menu`. Every change is reported by `selection-changed`,
 and `has-selection` notifies when it flips.
 Selection across an image block contributes the block's alt text to the
 copied string rather than xtext's all-or-nothing behavior. A reply
-header contributes nothing, and search doesn't look in it. A right-click
-on the selection as painted offers Copy; a decoded image paints none over
-itself, so a right-click on a selected one is its row's.
+header and reaction chips contribute nothing, and search doesn't look in
+them. A right-click on the selection as painted offers Copy; a decoded
+image paints none over itself, so a right-click on a selected one is its
+row's.
 
 **Two controllers on one widget have no GTK-guaranteed ordering.**
 Double- and triple-click were broken on arrival: the multi-click handler
@@ -640,7 +641,8 @@ The view is focusable, and Tab is how someone without a pointer reaches
 what a click reaches. Its stops are the view as a whole, where the
 scrolling keys work and a screen reader reads the log, and then each
 thing on screen a click does something to — a speaker's name or avatar,
-a reply header, a link, a load-more row, an image — in reading order.
+a reply header, a link, a load-more row, an image, a reaction chip — in
+reading order.
 Tab from outside lands on the view, and Shift+Tab from outside on the
 last item on screen. Past the last item on screen, or back past the
 view, focus moves on to the neighboring widget, so it never traps the
@@ -775,6 +777,7 @@ Clicks reach the application as typed signals, never as a word to match:
 | `load-more (direction)` | click anywhere on a load-more row | nothing |
 | `media-activated (token)` | primary click on an image or its placeholder | nothing |
 | `reply-activated (mark)` | primary click on a reply header | nothing |
+| `reaction-activated (mark, key)` | primary click on a reaction chip | nothing |
 | `row-menu (mark, x, y) → handled` | secondary click on a message, anywhere but a link, a nick, an avatar or the selection | the view pops its own Copy / Select All menu |
 | `selection-changed` | the selection is made, extended or cleared | — |
 
@@ -798,7 +801,9 @@ row's menu is where an application offers Reply or React; the view's
 Copy and Select All remain for one that doesn't handle it, and for a
 right-click on the selection, which is about the selection. Load-more and
 divider rows are the view's own, and have no row menu. The Menu key
-opens a row's menu from a focused reply header or image.
+opens a row's menu from a focused reply header, image or reaction chip.
+A reaction chip is the row's mark and the key the application gave it,
+since a row has several.
 
 A primary click on a link opens it, as it does everywhere else on the
 desktop — unless the view's `activate-links` property is off, which an
@@ -945,6 +950,35 @@ to the first stop after it that is still there, or the row's first when
 none is. A load-more
 row takes no header, and a row replaced by one drops its own.
 
+### Reactions
+
+`rotulus_view_set_reactions` puts a row's reactions under its body as
+chips, wrapping as words do: each a key, drawn as text (an emoji), and
+how many made it, tinted with the selection's color when one of them is
+the reader's. They are built with a `RotulusReactions`
+(`rotulus_reactions_new`, then `_add` per chip with its key, count,
+whether it is the reader's, and a label for a screen reader, such as
+"thumbs up"), set all at once and as often as needed, and like a reply
+header they belong to the row: a replace keeps them, setting what a row
+has changes nothing, and they live beside the rows in the buffer. From
+Rust, `RotulusView::set_reactions` takes a `Vec<Reaction>`. A builder
+rather than an array of structs gives C and the bindings one path.
+
+The key is the application's identity for the reaction and comes back
+in `reaction-activated`, so it is never cut or repaired: a key that is
+empty, longer than 32 code points, not UTF-8, holds a line break, or
+repeats an earlier one is left out, and so is any chip past the 64th.
+Labels are kept to one line, as a reply's text is. A load-more row takes
+no reactions, and a row replaced by one drops those it had: it is a
+button, not a message. Keyboard focus on a chip stays on its reaction as
+the others come and go, and Tab to a chip under a message taller than
+the view scrolls the chip itself into sight, not just its row's top;
+Tab to an item already in sight leaves the view where it is.
+
+Chips are measured by `rotulus-layout` and their positions recorded in
+the layout, so drawing, clicking and the focus ring use one set of
+boxes; a click between chips is nothing, as beside a header.
+
 ### Accessibility
 
 The view's accessible role is `log`. Built against GTK 4.14 or newer (the
@@ -961,7 +995,9 @@ see where it goes. GTK 4 has no hypertext interface for marking links in
 an accessible text, so that is the only way an address gets across. A
 reply header reads after the speaker and before what they said, which
 starts a line of its own: "bo: replying to al: see you there", then the
-reply.
+reply. A row's reactions follow on a line of their own, each by the
+label the application gave it, its count, and whether the reader is
+among them: "reactions: thumbs up, 3, including you; heart, 1".
 
 Words, lines and rows are reported the way GTK's own text widgets report
 them, each running to where the next starts, so a reader stepping through
@@ -1152,8 +1188,8 @@ who uses one.
 
 ### The row menu from the keyboard
 
-The Menu key opens a row's menu from a focused reply header or image,
-but not from a speaker or a link, which have menus of
+The Menu key opens a row's menu from a focused reply header, image or
+reaction chip, but not from a speaker or a link, which have menus of
 their own, so most messages can't be given `row-menu` from the keyboard.
 Giving each row a focus stop of its own would add one per message to
 the Tab order, and is worth deciding with someone who navigates that
@@ -1166,6 +1202,13 @@ row's sources, so a range in it maps to the row's nick: a screen
 reader's highlight for the header lands on the nick beside it.
 Giving it a source of its own would take a `LineSource` for it through
 selection, search and hit-testing, which deliberately ignore it.
+
+### Custom emoji
+
+A chip draws its key as text. A custom emoji would add a media token to
+the reaction, drawn from the view's media table as an image block is and
+measured by `TextMeasure::image_size`, through a call of its own beside
+`rotulus_reactions_add`; the key would stay the reaction's identity.
 
 ### Animated media from a binding
 

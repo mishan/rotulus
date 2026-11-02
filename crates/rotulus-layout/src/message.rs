@@ -183,6 +183,23 @@ impl Reply {
     }
 }
 
+/// One reaction to a row, drawn as a chip under its body: the reaction,
+/// how many made it, and whether you did.
+///
+/// `key` is the application's: drawn as text, and handed back when the
+/// chip is clicked. It is Unicode emoji today; a custom emoji would add a
+/// media token beside it, drawn from the view's media table as an
+/// [`Block::Image`] is, with the key still the identity.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Reaction {
+    pub key: String,
+    pub count: u32,
+    /// Whether one of them is yours, which draws the chip highlighted.
+    pub mine: bool,
+    /// What a screen reader calls it ("thumbs up"); the key when `None`.
+    pub label: Option<String>,
+}
+
 /// Intrinsic pixel size of an image block, as reported by the decoder.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ImageSize {

@@ -53,3 +53,27 @@ msgstr "en respuesta a {nick}: {excerpt}"
 msgctxt "accessible reply"
 msgid "replying to a message: {text}"
 msgstr "en respuesta a un mensaje: {text}"
+
+msgctxt "accessible reaction"
+msgid "{label}, {count}"
+msgstr "{label}, {count}"
+
+msgctxt "accessible reaction"
+msgid "{label}, {count}, including you"
+msgstr "{label}, {count}, incluido tú"
+
+msgctxt "accessible reaction"
+msgid "reactions: {list}"
+msgstr "reacciones: {list}"
+
+msgctxt "accessible reaction"
+msgid "{label}"
+msgstr "{label}"
+
+msgctxt "accessible reaction"
+msgid "{label}, including you"
+msgstr "{label}, incluido tú"
+
+msgctxt "accessible reaction"
+msgid "; "
+msgstr "; "
