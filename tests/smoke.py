@@ -49,11 +49,14 @@ assert marked == [True, True], marked
 
 reactions = Rotulus.Reactions.new()
 reactions.add("+1", 3, True, "thumbs up")
+reactions.add_full("emoji:17", "?", 1, False, None)
 assert view.set_reactions(first, reactions)
 keys = []
 view.connect("reaction-activated", lambda v, mark, key: keys.append((v.set_reactions(mark, None), key)))
+view.connect("reaction-menu", lambda v, mark, key, x, y: keys.append((mark is not None, key)) or True)
 view.emit("reaction-activated", first, "+1")
-assert keys == [(True, "+1")], keys
+assert view.emit("reaction-menu", first, "emoji:17", 1.0, 2.0)
+assert keys == [(True, "+1"), (True, "emoji:17")], keys
 
 view.set_property("markdown", True)
 assert view.get_property("markdown")

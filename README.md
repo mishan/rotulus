@@ -132,14 +132,15 @@ view.append(Message::live(Speaker::new(42, "alice"), ParsedText::plain("hello"))
 
 The view is a GtkScrollable, so put it in a GtkScrolledWindow. Leave it
 focusable: Tab steps through its links, speakers, images and load-more
-rows, and Enter activates them as a click does. The application reacts
-through signals:
+rows, and Enter activates them as a click does; Up and Down step through
+its rows, and Menu opens a row's menu. The application reacts through
+signals:
 
 - `link-activated`, `link-menu`
 - `speaker-activated`, `speaker-menu`
 - `load-more`
 - `media-activated`
-- `reply-activated`, `reaction-activated`, `row-menu`
+- `reply-activated`, `reaction-activated`, `reaction-menu`, `row-menu`
 - `selection-changed`
 
 The API reference for C and the language bindings is at

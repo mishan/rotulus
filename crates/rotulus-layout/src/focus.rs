@@ -32,6 +32,9 @@ pub enum FocusItem {
     Image { message: MessageId, block: usize },
     /// A reaction chip, by its place under the row.
     Reaction { message: MessageId, index: usize },
+    /// A row as a whole, which Up and Down step through and Tab never
+    /// stops on: how a row with no item of its own is given its menu.
+    Row { message: MessageId },
 }
 
 impl FocusItem {
@@ -43,7 +46,8 @@ impl FocusItem {
             | FocusItem::Link { message, .. }
             | FocusItem::LoadMore { message }
             | FocusItem::Image { message, .. }
-            | FocusItem::Reaction { message, .. } => *message,
+            | FocusItem::Reaction { message, .. }
+            | FocusItem::Row { message } => *message,
         }
     }
 }
@@ -110,6 +114,10 @@ impl ChatBuffer {
         let mut row = if forward { first } else { last };
         if let Some(f) = from {
             if let Some(r) = self.row_of(f.message()).filter(|r| shown(*r)) {
+                // A row as a whole comes before its items.
+                if let FocusItem::Row { .. } = f {
+                    row = if forward { r } else { r.checked_sub(1)? };
+                }
                 let items = self.focus_items(r);
                 if let Some(at) = items.iter().position(|i| i == f) {
                     let next = if forward {
@@ -141,5 +149,40 @@ impl ChatBuffer {
             };
         }
         None
+    }
+
+    /// The row after the one `from` is on (or before it, going back), for
+    /// Up and Down, skipping the rows that have no menu: dividers and
+    /// load-more rows. Without `from`, or when its row is out of `rows`,
+    /// the first row on screen (or the last, going back). `None` past
+    /// either end of the scrollback.
+    pub fn step_row(
+        &self,
+        from: Option<&FocusItem>,
+        forward: bool,
+        rows: (usize, usize),
+    ) -> Option<FocusItem> {
+        let (first, last) = (rows.0, rows.1.min(self.len().checked_sub(1)?));
+        let from = from
+            .and_then(|f| self.row_of(f.message()))
+            .filter(|r| (first..=last).contains(r));
+        let mut row = match (from, forward) {
+            (Some(r), true) => r + 1,
+            (Some(r), false) => r.checked_sub(1)?,
+            (None, true) => first,
+            (None, false) => last,
+        };
+        loop {
+            if !self.message_at(row)?.kind.is_framing() {
+                return Some(FocusItem::Row {
+                    message: self.id_at(row)?,
+                });
+            }
+            row = if forward {
+                row + 1
+            } else {
+                row.checked_sub(1)?
+            };
+        }
     }
 }

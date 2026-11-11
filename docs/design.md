@@ -651,14 +651,25 @@ Tab starts from what is on screen.
 `rotulus-layout` decides the items and their order (`FocusItem`,
 `ChatBuffer::step_focus`), tested headless.
 
+Up and Down put focus on a row as a whole, the row below or above the
+one focus is on, or the first or last on screen from the view; past the
+screen they scroll, and at either end of the scrollback they stay, as in
+a list, rather than moving focus out of the view. Tab goes on from the
+row to its items. They skip dividers and load-more rows, which have no
+menu. This is how a keyboard reaches the menu of a row that has no item
+of its own — a grouped row draws no speaker, and a server line, an
+emote or a history row from an unknown speaker has none — without a Tab
+stop per message. The ring goes around the row, and a screen reader
+hears the row read as the transcript reads it, then "message".
+
 The focused item gets a ring, drawn once the keyboard has been used, as
 GTK draws its own; focus on the view as a whole rings the view. Enter
 or Space does exactly what a primary click on the item does, signals
 and all, and Menu or Shift+F10 opens what a secondary click opens — for
-the item, or the view's own menu — and the view keeps the key. The
-menus' rows are focusable, so a menu opened from the keyboard is usable
-from it, and closing it (Escape, or choosing a row) puts focus back on
-the view and its item. Ctrl+A selects
+the item, the row, or the view's own menu — and the view keeps the
+key. The menus' rows are focusable, so a menu opened from the keyboard
+is usable from it, and closing it (Escape, or choosing a row) puts focus
+back on the view and its item. Ctrl+A selects
 everything, Ctrl+C copies, and Escape drops the item focus and the
 selection. With GTK 4.14 the accessible caret moves to the focused item
 and the view announces its text and what it is ("link", "user").
@@ -778,7 +789,8 @@ Clicks reach the application as typed signals, never as a word to match:
 | `media-activated (token)` | primary click on an image or its placeholder | nothing |
 | `reply-activated (mark)` | primary click on a reply header | nothing |
 | `reaction-activated (mark, key)` | primary click on a reaction chip | nothing |
-| `row-menu (mark, x, y) → handled` | secondary click on a message, anywhere but a link, a nick, an avatar or the selection | the view pops its own Copy / Select All menu |
+| `reaction-menu (mark, key, x, y) → handled` | secondary click on a reaction chip | the chip's row's `row-menu` |
+| `row-menu (mark, x, y) → handled` | secondary click on a message, anywhere but a link, a nick, an avatar or the selection, or on a reaction chip whose `reaction-menu` is unhandled | the view pops its own Copy / Select All menu |
 | `selection-changed` | the selection is made, extended or cleared | — |
 
 They replaced xtext's `word-click`, which handed every click over as the
@@ -801,9 +813,11 @@ row's menu is where an application offers Reply or React; the view's
 Copy and Select All remain for one that doesn't handle it, and for a
 right-click on the selection, which is about the selection. Load-more and
 divider rows are the view's own, and have no row menu. The Menu key
-opens a row's menu from a focused reply header, image or reaction chip.
-A reaction chip is the row's mark and the key the application gave it,
-since a row has several.
+opens a row's menu from a focused reply header or image, and from a row
+the keyboard is on as a whole. A reaction chip is the row's mark and
+the key the application gave it, since a row has several; its menu is
+for that reaction ("who reacted"), and is its row's when the application
+doesn't take it.
 
 A primary click on a link opens it, as it does everywhere else on the
 desktop — unless the view's `activate-links` property is off, which an
@@ -974,6 +988,16 @@ button, not a message. Keyboard focus on a chip stays on its reaction as
 the others come and go, and Tab to a chip under a message taller than
 the view scrolls the chip itself into sight, not just its row's top;
 Tab to an item already in sight leaves the view where it is.
+
+A chip can draw a text in place of its key (`_add_full`, or `text` in
+Rust): a custom emoji the application can't show, say, drawn as one
+placeholder however many there are, each still known by its own key.
+The text is only drawn, so it is cut to one line of 32 code points
+rather than refused, and a blank one draws the key; without a label, a
+screen reader reads what is drawn. A secondary click on a chip, or Menu
+on a focused one, is `reaction-menu`, naming the chip, so an
+application can list who made that reaction; unhandled, it is the row's
+`row-menu`.
 
 Chips are measured by `rotulus-layout` and their positions recorded in
 the layout, so drawing, clicking and the focus ring use one set of
@@ -1186,15 +1210,6 @@ not call `gtk_accessible_announce` for it. Whether a screen reader should
 speak every new message, and how politely, is worth deciding with someone
 who uses one.
 
-### The row menu from the keyboard
-
-The Menu key opens a row's menu from a focused reply header, image or
-reaction chip, but not from a speaker or a link, which have menus of
-their own, so most messages can't be given `row-menu` from the keyboard.
-Giving each row a focus stop of its own would add one per message to
-the Tab order, and is worth deciding with someone who navigates that
-way.
-
 ### The reply header in the accessible text
 
 A header is read in its row's accessible text, but it isn't one of the
@@ -1205,10 +1220,11 @@ selection, search and hit-testing, which deliberately ignore it.
 
 ### Custom emoji
 
-A chip draws its key as text. A custom emoji would add a media token to
-the reaction, drawn from the view's media table as an image block is and
-measured by `TextMeasure::image_size`, through a call of its own beside
-`rotulus_reactions_add`; the key would stay the reaction's identity.
+A chip draws its key, or a text in its place, but no image. A custom
+emoji would add a media token to the reaction, drawn from the view's
+media table as an image block is and measured by
+`TextMeasure::image_size`, with the text as its fallback; the key would
+stay the reaction's identity.
 
 ### Animated media from a binding
 

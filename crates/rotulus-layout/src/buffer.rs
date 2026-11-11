@@ -511,7 +511,8 @@ impl ChatBuffer {
     /// code points, holds a control character or a line or paragraph
     /// separator, or repeats an earlier one's, is dropped, and so is
     /// any past [`REACTIONS_CAP`]. A label is kept to one line of
-    /// [`REPLY_TEXT_CAP`] characters, as a reply's text is.
+    /// [`REPLY_TEXT_CAP`] characters, as a reply's text is, and a text to
+    /// one line of [`REACTION_KEY_CAP`]; a blank text draws the key.
     pub fn set_reactions(
         &mut self,
         id: MessageId,
@@ -536,6 +537,10 @@ impl ChatBuffer {
                 continue;
             }
             r.label = r.label.map(one_line);
+            r.text = r
+                .text
+                .map(|t| one_line(t).chars().take(REACTION_KEY_CAP).collect())
+                .filter(|t: &String| !t.trim().is_empty());
             kept.push(r);
         }
         if self.reactions_of(id) == kept.as_slice() {

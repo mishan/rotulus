@@ -38,6 +38,10 @@ msgctxt "accessible role"
 msgid "image"
 msgstr "画像"
 
+msgctxt "accessible role"
+msgid "message"
+msgstr "メッセージ"
+
 msgctxt "item announcement"
 msgid "{text}, {kind}"
 msgstr "{text}、{kind}"

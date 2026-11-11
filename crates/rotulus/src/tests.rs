@@ -492,6 +492,7 @@ fn gtk_class_and_construction_smoke() {
             c"reply-activated",
             c"row-menu",
             c"reaction-activated",
+            c"reaction-menu",
         ] {
             let id =
                 gtk4::glib::gobject_ffi::g_signal_lookup(name.as_ptr() as *const _, t.into_glib());
@@ -828,6 +829,7 @@ fn gtk_class_and_construction_smoke() {
     check_replace_and_marker();
     check_text_scale_remeasures();
     check_keyboard_focus();
+    check_row_keyboard();
     #[cfg(feature = "v4_14")]
     check_accessible_caret();
 }
@@ -974,6 +976,106 @@ fn check_keyboard_focus() {
         view.is_focus(),
         "closing the menu returns focus to the view"
     );
+    window.destroy();
+}
+
+/// Up and Down put the keyboard on a row as a whole, any row with a menu,
+/// and Menu there is the row's `row-menu`.
+fn check_row_keyboard() {
+    use crate::view::RowMark;
+    use rotulus_layout::{FocusItem, LoadMoreDirection, Message, MessageKind};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let view = crate::view::RotulusView::new();
+    view.set_indent(true);
+    let framing = |kind| Message {
+        kind,
+        ..Message::system(rotulus_layout::ParsedText::plain("framing"))
+    };
+    view.append(framing(MessageKind::LoadMore(LoadMoreDirection::Older)));
+    let old = view.append(Message {
+        kind: MessageKind::History {
+            server_message_id: 9,
+        },
+        ..message_row(7, "al", "earlier")
+    });
+    view.append(framing(MessageKind::Divider));
+    let al = view.append(message_row(7, "al", "see https://example.com"));
+    let grouped = view.append(message_row(7, "al", "more"));
+    let emote = view.append(message_row(0, "*", "al waves"));
+    let holder = laid_out(&view);
+    let window = gtk4::Window::new();
+    window.set_child(Some(&holder));
+    holder.allocate(400, 300, -1, None);
+    let focused = || view.imp_ref().focus_item.borrow().clone();
+
+    let seen: Rc<RefCell<Vec<u64>>> = Rc::default();
+    {
+        let seen = seen.clone();
+        view.connect_closure(
+            "row-menu",
+            false,
+            gtk4::glib::closure_local!(move |_: crate::view::RotulusView,
+                                             m: RowMark,
+                                             _x: f64,
+                                             _y: f64|
+                  -> bool {
+                seen.borrow_mut().push(m.0 .0);
+                true
+            }),
+        );
+    }
+    assert!(view.grab_focus());
+    gtk4::prelude::GtkWindowExt::set_focus_visible(&window, false);
+    let mut up = Vec::new();
+    while view.step_row_focus(false) {
+        let item = focused().expect("Up lands on a row");
+        assert!(!view.item_boxes(&item).is_empty(), "it has a ring to draw");
+        assert!(!view.activate_focused(), "Enter on a row does nothing");
+        view.open_focused_menu();
+        up.push(item);
+    }
+    assert!(
+        gtk4::prelude::GtkWindowExt::gets_focus_visible(&window),
+        "the keyboard was used: the ring shows"
+    );
+    let rows = [emote, grouped, al, old];
+    assert_eq!(
+        up,
+        rows.map(|message| FocusItem::Row { message }),
+        "from the view as a whole, the last row, then up past the framing rows"
+    );
+    assert_eq!(
+        *seen.borrow(),
+        rows.map(|m| m.0),
+        "Menu on each is its row's menu"
+    );
+    assert_eq!(
+        focused(),
+        Some(FocusItem::Row { message: old }),
+        "the top holds"
+    );
+
+    view.imp_ref()
+        .focus_item
+        .replace(Some(FocusItem::Row { message: al }));
+    assert!(view.child_focus(gtk4::DirectionType::TabForward));
+    assert_eq!(
+        focused(),
+        Some(FocusItem::Speaker { message: al }),
+        "Tab goes on from the row to its items"
+    );
+    assert!(view.step_row_focus(true));
+    assert_eq!(focused(), Some(FocusItem::Row { message: grouped }));
+    // A header set on the row, or an edit of it, leaves the keyboard there.
+    let quote = rotulus_layout::Reply::Unavailable("gone".into());
+    assert!(view.set_reply(grouped, Some(quote)));
+    assert_eq!(focused(), Some(FocusItem::Row { message: grouped }));
+    assert!(view.replace(grouped, message_row(7, "al", "edited")));
+    assert_eq!(focused(), Some(FocusItem::Row { message: grouped }));
+    assert!(view.replace(grouped, framing(MessageKind::Divider)));
+    assert_eq!(focused(), None, "not on a row that has no menu");
     window.destroy();
 }
 
@@ -1728,6 +1830,7 @@ fn check_reactions() {
 
     let react = |key: &str, count, mine| Reaction {
         key: key.into(),
+        text: None,
         count,
         mine,
         label: None,
@@ -1771,6 +1874,24 @@ fn check_reactions() {
             }),
         );
     }
+    // Whether the application takes a chip's menu, or leaves it to the row.
+    let takes = Rc::new(std::cell::Cell::new(false));
+    {
+        let (seen, takes) = (seen.clone(), takes.clone());
+        view.connect_closure(
+            "reaction-menu",
+            false,
+            gtk4::glib::closure_local!(move |_: crate::view::RotulusView,
+                                             m: RowMark,
+                                             key: String,
+                                             _x: f64,
+                                             _y: f64|
+                  -> bool {
+                seen.borrow_mut().push(format!("menu {} {key}", m.0 .0));
+                takes.get()
+            }),
+        );
+    }
     let chip = |i: usize| {
         find_point(
             &view,
@@ -1782,6 +1903,8 @@ fn check_reactions() {
     let (first, second) = (chip(0), chip(1));
     view.activate_at(first.0, first.1);
     view.activate_at(second.0, second.1);
+    view.open_menu_at(second.0, second.1);
+    takes.set(true);
     view.open_menu_at(second.0, second.1);
     let between = {
         let buf = view.imp_ref().buffer.borrow();
@@ -1822,7 +1945,14 @@ fn check_reactions() {
     let n = id.0;
     assert_eq!(
         *seen.borrow(),
-        [format!("{n} +1"), format!("{n} ok"), format!("row {n}")]
+        [
+            format!("{n} +1"),
+            format!("{n} ok"),
+            format!("menu {n} ok"),
+            format!("row {n}"),
+            format!("menu {n} ok"),
+        ],
+        "a chip's menu is its row's only when the application doesn't take it"
     );
 
     // From the keyboard: the chips are the row's last stops, and Enter is
@@ -1838,7 +1968,9 @@ fn check_reactions() {
     assert!(!view.item_boxes(&item).is_empty(), "it has a ring to draw");
     seen.borrow_mut().clear();
     assert!(view.activate_focused());
-    assert_eq!(*seen.borrow(), [format!("{n} ok")]);
+    view.open_focused_menu();
+    assert_eq!(*seen.borrow(), [format!("{n} ok"), format!("menu {n} ok")]);
+    takes.set(false);
 
     // Focus stays on its reaction when the ones before it go.
     assert!(view.set_reactions(

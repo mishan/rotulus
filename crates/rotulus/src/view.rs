@@ -630,6 +630,19 @@ pub(crate) mod imp {
                     glib::subclass::Signal::builder("reaction-activated")
                         .param_types([RowMark::static_type(), String::static_type()])
                         .build(),
+                    // (mark, key, x, y) -> handled. A secondary click on a
+                    // reaction chip. Unhandled, it is the row's row-menu.
+                    glib::subclass::Signal::builder("reaction-menu")
+                        .param_types([
+                            RowMark::static_type(),
+                            String::static_type(),
+                            f64::static_type(),
+                            f64::static_type(),
+                        ])
+                        .return_type::<bool>()
+                        .run_last()
+                        .accumulator(first_handled)
+                        .build(),
                 ]
             })
         }
@@ -1507,12 +1520,13 @@ impl RotulusView {
                 .map(|r| buf.focus_items(r))
                 .unwrap_or_default()
         };
-        // The focused stop and the row's stops, when focus is on the row.
+        // The focused stop and the row's stops, when focus is on one of
+        // the row's stops.
         let focused = imp
             .focus_item
             .borrow()
             .clone()
-            .filter(|i| i.message() == id);
+            .filter(|i| i.message() == id && !matches!(i, FocusItem::Row { .. }));
         let before = focused.map(|f| (f, items(&imp.buffer.borrow())));
         let change = {
             let m = imp.measure.borrow();
@@ -1648,11 +1662,17 @@ impl RotulusView {
             // point at different bytes.
             self.imp_().search.borrow_mut().clear();
             self.clear_selection();
-            // A focused link may not be there any more.
-            self.imp_()
-                .focus_item
+            // A focused link may not be there any more; a row is, unless
+            // it is now one without a menu.
+            let imp = self.imp_();
+            let kept = imp
+                .buffer
+                .borrow()
+                .message(id)
+                .is_some_and(|m| !m.kind.is_framing());
+            imp.focus_item
                 .borrow_mut()
-                .take_if(|i| i.message() == id);
+                .take_if(|i| i.message() == id && !(kept && matches!(i, FocusItem::Row { .. })));
             self.after_content_change();
             self.a11y_replaced(id);
         }
@@ -2244,7 +2264,7 @@ impl RotulusView {
     }
 
     /// Reaction chips: a rounded box each, tinted with the selection's
-    /// color for the reader's own, then the key and its count.
+    /// color for the reader's own, then what it draws and its count.
     #[allow(clippy::too_many_arguments)]
     fn draw_chips(
         &self,
@@ -2281,10 +2301,7 @@ impl RotulusView {
             let ink = legibility.ink(fg, Some(&fill));
             let ty = y + c.height.saturating_sub(line_h) as f32 / 2.0;
             let count = (r.count > 0).then(|| r.count.to_string());
-            for (x, text) in [
-                (c.key_x, Some(r.key.as_str())),
-                (c.count_x, count.as_deref()),
-            ] {
+            for (x, text) in [(c.key_x, Some(r.drawn())), (c.count_x, count.as_deref())] {
                 let Some(text) = text else { continue };
                 layout.set_text(text);
                 snapshot.save();
@@ -3809,12 +3826,18 @@ impl RotulusView {
     }
 
     /// The menu for `target`, as a secondary click on it opens: a
-    /// person's menu over a nick, the link menu over a link, the row's
-    /// anywhere else on one, and the view's own when nobody handles that.
+    /// person's menu over a nick, the link menu over a link, a chip's over
+    /// a reaction, the row's anywhere else on one or when nobody handles a
+    /// chip's, and the view's own when nobody handles that.
     /// `at_pointer` when a click opened it at `(x, y)`; the keyboard opens
     /// a focused item's menu from a point near it, which says nothing
     /// about the selection.
     fn open_menu(&self, target: Option<HoverTarget>, x: f64, y: f64, at_pointer: bool) {
+        if let Some(HoverTarget::Reaction { message, key, .. }) = &target {
+            if self.emit_by_name::<bool>("reaction-menu", &[&RowMark(*message), key, &x, &y]) {
+                return;
+            }
+        }
         match target {
             Some(HoverTarget::Nick { key, .. }) => {
                 self.emit_by_name::<()>("speaker-menu", &[&key, &x, &y]);
@@ -3845,23 +3868,26 @@ impl RotulusView {
                     Some(t) => Some(t.message()),
                     None => None,
                 };
-                // Paging and framing rows are the view's, not messages.
-                let row = row.filter(|id| {
-                    self.imp_().buffer.borrow().message(*id).is_some_and(|m| {
-                        !matches!(
-                            m.kind,
-                            rotulus_layout::MessageKind::LoadMore(_)
-                                | rotulus_layout::MessageKind::Divider
-                        )
-                    })
-                });
-                let handled = row.is_some_and(|id| {
-                    self.emit_by_name::<bool>("row-menu", &[&RowMark(id), &x, &y])
-                });
-                if !handled {
-                    self.show_context_menu(x, y);
-                }
+                self.open_row_menu(row, x, y);
             }
+        }
+    }
+
+    /// `row-menu` for `row`, or the view's own menu when there is no row
+    /// or nobody handles it.
+    fn open_row_menu(&self, row: Option<MessageId>, x: f64, y: f64) {
+        // Paging and framing rows are the view's, not messages.
+        let row = row.filter(|id| {
+            self.imp_()
+                .buffer
+                .borrow()
+                .message(*id)
+                .is_some_and(|m| !m.kind.is_framing())
+        });
+        let handled =
+            row.is_some_and(|id| self.emit_by_name::<bool>("row-menu", &[&RowMark(id), &x, &y]));
+        if !handled {
+            self.show_context_menu(x, y);
         }
     }
 
@@ -4211,11 +4237,24 @@ impl RotulusView {
             };
             let ctrl = state.contains(gtk4::gdk::ModifierType::CONTROL_MASK);
             let shift = state.contains(gtk4::gdk::ModifierType::SHIFT_MASK);
+            let plain = !state.intersects(
+                gtk4::gdk::ModifierType::CONTROL_MASK
+                    | gtk4::gdk::ModifierType::SHIFT_MASK
+                    | gtk4::gdk::ModifierType::ALT_MASK,
+            );
             let handled = match keyval {
                 Key::Return | Key::KP_Enter | Key::ISO_Enter | Key::space | Key::KP_Space
                     if !ctrl =>
                 {
                     this.activate_focused()
+                }
+                // With focus on an item, the view keeps them at either end,
+                // as a list does.
+                Key::Up | Key::KP_Up if plain => {
+                    this.step_row_focus(false) || this.imp_().focus_item.borrow().is_some()
+                }
+                Key::Down | Key::KP_Down if plain => {
+                    this.step_row_focus(true) || this.imp_().focus_item.borrow().is_some()
                 }
                 Key::Menu => {
                     this.open_focused_menu();
@@ -4292,6 +4331,28 @@ impl RotulusView {
         let moved = next.is_some();
         self.set_focus_item(next);
         moved || !forward
+    }
+
+    /// Move keyboard focus to the row below the one it is on, for Down
+    /// (`forward`), or above, for Up. Off the ends, it stays.
+    pub(crate) fn step_row_focus(&self, forward: bool) -> bool {
+        let item = self.imp_().focus_item.borrow().clone();
+        let next = self.visible_rows().and_then(|rows| {
+            self.imp_()
+                .buffer
+                .borrow()
+                .step_row(item.as_ref(), forward, rows)
+        });
+        let moved = next.is_some();
+        if moved {
+            // GTK shows focus for its own navigation keys, and these are
+            // the view's.
+            if let Some(w) = self.root().and_downcast::<gtk4::Window>() {
+                w.set_focus_visible(true);
+            }
+            self.set_focus_item(next);
+        }
+        moved
     }
 
     /// Let go of a focused item whose row is gone.
@@ -4400,6 +4461,16 @@ impl RotulusView {
                     (at(*source, range.start), text)
                 }
                 FocusItem::LoadMore { .. } => (at(LineSource::Block(0), 0), msg.to_plain_text()),
+                FocusItem::Row { message } => (
+                    at(LineSource::Block(0), 0),
+                    crate::a11y::TextModel::row_text(
+                        msg,
+                        buf.reply(*message),
+                        buf.reactions_of(*message),
+                        &self.a11y_format(),
+                    )
+                    .0,
+                ),
                 FocusItem::Image { block, .. } => {
                     let alt = match msg.blocks.get(*block) {
                         Some(rotulus_layout::Block::Image { alt, .. }) => alt.clone(),
@@ -4434,6 +4505,9 @@ impl RotulusView {
             FocusItem::LoadMore { .. } => crate::trc("accessible role", "button"),
             FocusItem::Image { .. } => crate::trc("accessible role", "image"),
             FocusItem::Reaction { .. } => crate::trc("accessible role", "button"),
+            // Translators: a whole message in the chat view, which Up and
+            // Down move keyboard focus between.
+            FocusItem::Row { .. } => crate::trc("accessible role", "message"),
             _ => return,
         };
         self.a11y_move_caret(Some(Selection::new(caret, caret)));
@@ -4514,6 +4588,16 @@ impl RotulusView {
     pub(crate) fn open_focused_menu(&self) {
         let item = self.imp_().focus_item.borrow().clone();
         match item {
+            Some(FocusItem::Row { message }) => {
+                // A row taller than what is shown, or scrolled out of it,
+                // would point the menu past the view.
+                let (x, y) = self.item_point(&FocusItem::Row { message });
+                let y = y.clamp(
+                    f64::from(PAD_Y),
+                    f64::from(PAD_Y) + f64::from(content_height(self.height())),
+                );
+                self.open_row_menu(Some(message), x, y);
+            }
             Some(item) => {
                 let (x, y) = self.item_point(&item);
                 self.open_menu(self.target_of(&item), x, y, false);
@@ -4582,7 +4666,7 @@ impl RotulusView {
                     }
                 }
             }
-            FocusItem::LoadMore { .. } => {
+            FocusItem::LoadMore { .. } | FocusItem::Row { .. } => {
                 out.push(rect(0, 0, content_width(self.width()), layout.height));
             }
             FocusItem::Image { block, .. } => {
