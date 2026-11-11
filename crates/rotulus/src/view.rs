@@ -1596,6 +1596,12 @@ impl RotulusView {
         change != RowChange::Gone
     }
 
+    /// The reactions the row `id` names shows, as `set_reactions` kept
+    /// them; none when it has none or is gone.
+    pub fn reactions_of(&self, id: MessageId) -> Vec<Reaction> {
+        self.imp_().buffer.borrow().reactions_of(id).to_vec()
+    }
+
     pub fn append(&self, msg: Message) -> MessageId {
         let imp = self.imp_();
         let before = imp.buffer.borrow().len();

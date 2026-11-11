@@ -1989,6 +1989,13 @@ fn check_reactions() {
         })
     );
     assert!(view.set_reactions(id, vec![react("ok", 1, false), react("eyes", 2, false)]));
+    let keys = |id| {
+        view.reactions_of(id)
+            .into_iter()
+            .map(|r| (r.key, r.count))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(keys(id), [("ok".into(), 1), ("eyes".into(), 2)]);
     assert_eq!(
         *view.imp_ref().focus_item.borrow(),
         Some(FocusItem::Reaction {
@@ -2018,7 +2025,9 @@ fn check_reactions() {
     assert!(view.set_reactions(id, Vec::new()));
     let _holder = laid_out(&view);
     assert!(find_point(&view, 0, |t| matches!(t, HoverTarget::Reaction { .. })).is_none());
+    assert!(view.set_reactions(id, vec![react("+1", 3, true)]));
     assert!(view.remove(id));
+    assert_eq!(keys(id), [], "a removed row shows none");
     assert!(
         !view.set_reactions(id, Vec::new()),
         "a stale mark sets nothing"

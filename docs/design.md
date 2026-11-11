@@ -975,7 +975,8 @@ whether it is the reader's, and a label for a screen reader, such as
 "thumbs up"), set all at once and as often as needed, and like a reply
 header they belong to the row: a replace keeps them, setting what a row
 has changes nothing, and they live beside the rows in the buffer. From
-Rust, `RotulusView::set_reactions` takes a `Vec<Reaction>`. A builder
+Rust, `RotulusView::set_reactions` takes a `Vec<Reaction>`, and
+`reactions_of` gives back what a row kept of them. A builder
 rather than an array of structs gives C and the bindings one path.
 
 The key is the application's identity for the reaction and comes back
