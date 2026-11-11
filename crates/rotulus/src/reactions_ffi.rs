@@ -59,6 +59,21 @@ pub unsafe extern "C" fn rotulus_reactions_add(
     mine: c_int,
     label: *const c_char,
 ) {
+    rotulus_reactions_add_full(r, key, std::ptr::null(), count, mine, label);
+}
+
+/// # Safety
+/// `r` is NULL or a valid `RotulusReactions *`; `key`, `text` and `label`
+/// are NULL or NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_reactions_add_full(
+    r: *mut RotulusReactions,
+    key: *const c_char,
+    text: *const c_char,
+    count: c_uint,
+    mine: c_int,
+    label: *const c_char,
+) {
     let (Some(r), false) = (r.as_mut(), key.is_null()) else {
         return;
     };
@@ -67,12 +82,14 @@ pub unsafe extern "C" fn rotulus_reactions_add(
     let Ok(key) = CStr::from_ptr(key).to_str() else {
         return;
     };
-    let text = |p: *const c_char| CStr::from_ptr(p).to_string_lossy().into_owned();
+    let lossy =
+        |p: *const c_char| (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy().into_owned());
     r.0.push(Reaction {
         key: key.to_owned(),
+        text: lossy(text),
         count,
         mine: mine != 0,
-        label: (!label.is_null()).then(|| text(label)),
+        label: lossy(label),
     });
 }
 
@@ -104,14 +121,25 @@ mod tests {
             rotulus_reactions_add(r, std::ptr::null(), 1, 0, std::ptr::null());
             rotulus_reactions_add(r, c"\xff".as_ptr(), 1, 0, std::ptr::null());
             rotulus_reactions_add(r, c"ok".as_ptr(), 1, 0, std::ptr::null());
+            rotulus_reactions_add_full(r, c"e:1".as_ptr(), c"?".as_ptr(), 2, 0, std::ptr::null());
             let copy = rotulus_reactions_copy(r);
             rotulus_reactions_free(r);
             let got = &copy.as_ref().expect("a copy").0;
             assert_eq!(
                 got.iter()
-                    .map(|r| (r.key.as_str(), r.count, r.mine, r.label.as_deref()))
+                    .map(|r| (
+                        r.key.as_str(),
+                        r.text.as_deref(),
+                        r.count,
+                        r.mine,
+                        r.label.as_deref()
+                    ))
                     .collect::<Vec<_>>(),
-                [("+1", 3, true, Some("thumbs up")), ("ok", 1, false, None)]
+                [
+                    ("+1", None, 3, true, Some("thumbs up")),
+                    ("ok", None, 1, false, None),
+                    ("e:1", Some("?"), 2, false, None)
+                ]
             );
             rotulus_reactions_free(copy);
         }

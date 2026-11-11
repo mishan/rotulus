@@ -153,7 +153,10 @@ GType rotulus_load_direction_get_type (void);
  * A secondary click on a message, anywhere but a link or a speaker, which
  * have menus of their own: for the application's actions on it, such as
  * replying to it. Not raised on the selection, where the view offers
- * Copy, nor on a load-more or divider row.
+ * Copy, nor on a load-more or divider row. On a reaction chip, it is
+ * raised when nobody handles [signal@Rotulus.View::reaction-menu]. From
+ * the keyboard, Up and Down put focus on a row as a whole, and Menu or
+ * Shift+F10 there raises it.
  *
  * Returns: %TRUE to say it was handled; otherwise the view pops its own
  *   Copy / Select All menu
@@ -168,6 +171,22 @@ GType rotulus_load_direction_get_type (void);
  * A primary click on a reaction chip (see
  * [method@Rotulus.View.set_reactions]), for the application to add or
  * take back the reader's own.
+ */
+
+/**
+ * RotulusView::reaction-menu:
+ * @self: the view
+ * @mark: the chip's row
+ * @key: the chip's key, as the application gave it
+ * @x: where the menu should point, in widget coordinates
+ * @y: where the menu should point, in widget coordinates
+ *
+ * A secondary click on a reaction chip, or Menu or Shift+F10 on a focused
+ * one: for the application's actions on that reaction, such as listing
+ * who made it.
+ *
+ * Returns: %TRUE to say it was handled; otherwise it is the row's
+ *   [signal@Rotulus.View::row-menu]
  */
 
 /* ---- palette ------------------------------------------------------ *
@@ -1020,12 +1039,12 @@ gboolean rotulus_view_clear_reply (RotulusView *self, RotulusMark *mark);
 /* ---- reactions ---------------------------------------------------- *
  *
  * A row's reactions are chips under its body, wrapping as words do: each
- * a key (an emoji) and how many made it, highlighted when one of them is
- * the reader's. They are set on a row after it is appended, all at once,
- * as often as needed, without touching the rest of the row; setting what
- * a row already has changes nothing. A replace keeps them. They aren't
- * copied with the row's text, nor searched; a screen reader reads them
- * after the row's body. */
+ * a key (an emoji), or a text drawn in its place, and how many made it,
+ * highlighted when one of them is the reader's. They are set on a row
+ * after it is appended, all at once, as often as needed, without touching
+ * the rest of the row; setting what a row already has changes nothing. A
+ * replace keeps them. They aren't copied with the row's text, nor
+ * searched; a screen reader reads them after the row's body. */
 
 /**
  * RotulusReactions:
@@ -1079,6 +1098,30 @@ void rotulus_reactions_free (RotulusReactions *self);
  */
 void rotulus_reactions_add (RotulusReactions *self, const char *key,
                             guint count, gboolean mine, const char *label);
+
+/**
+ * rotulus_reactions_add_full:
+ * @self: reactions
+ * @key: the reaction, handed back by
+ *   [signal@Rotulus.View::reaction-activated] and
+ *   [signal@Rotulus.View::reaction-menu]; at most 32 code points
+ * @text: (nullable): what the chip draws in the key's place, such as a
+ *   placeholder for a custom emoji; %NULL or blank draws the key
+ * @count: how many made it; 0 shows what the chip draws alone
+ * @mine: whether one of them is the reader's
+ * @label: (nullable): what a screen reader calls it, such as "thumbs up";
+ *   %NULL reads what the chip draws
+ *
+ * Adds a chip after those already added, as
+ * [method@Rotulus.Reactions.add] does. The key stays the reaction's
+ * identity whatever is drawn, so two chips may draw the same text; give
+ * each a label, or a screen reader can't tell them apart. A text
+ * that isn't UTF-8 is drawn with its bad bytes replaced, and is kept to
+ * one line of 32 code points.
+ */
+void rotulus_reactions_add_full (RotulusReactions *self, const char *key,
+                                 const char *text, guint count,
+                                 gboolean mine, const char *label);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (RotulusReactions, rotulus_reactions_free)
 

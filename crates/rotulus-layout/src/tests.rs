@@ -4362,6 +4362,7 @@ use crate::message::Reaction;
 fn react(key: &str, count: u32, mine: bool) -> Reaction {
     Reaction {
         key: key.into(),
+        text: None,
         count,
         mine,
         label: None,
@@ -4531,6 +4532,47 @@ fn reactions_the_view_cant_show_or_tell_apart_are_dropped() {
 }
 
 #[test]
+fn a_chip_draws_its_text_and_is_known_by_its_key() {
+    let m = FixedMeasure::new(8);
+    let mut b = ChatBuffer::new(params(400));
+    let id = b.append(nick_row("al", "one"), &m);
+    let shown = |key: &str, text: &str| Reaction {
+        text: Some(text.into()),
+        ..react(key, 3, false)
+    };
+    let long = format!("a\nb{}", "y".repeat(crate::buffer::REACTION_KEY_CAP));
+    b.set_reactions(
+        id,
+        vec![
+            shown("emoji:17", "*"),
+            shown("emoji:18", "*"),
+            shown("emoji:17", "x"),
+            shown("ok", ""),
+            shown("blank", " \n"),
+            shown("long", &long),
+        ],
+        &m,
+    );
+    let cut = format!("a b{}", "y".repeat(crate::buffer::REACTION_KEY_CAP - 3));
+    assert_eq!(
+        b.reactions_of(id),
+        [
+            shown("emoji:17", "*"),
+            shown("emoji:18", "*"),
+            react("ok", 3, false),
+            react("blank", 3, false),
+            shown("long", &cut),
+        ],
+        "one placeholder for two keys is two chips; a key twice is one; \
+         an empty or blank text draws the key; a long one is cut to a line"
+    );
+    b.ensure_visible(0, 200, &m);
+    let c = b.layout_at(0).unwrap().chips.as_deref().unwrap();
+    // A space, "*", a space and "3", a space: the text's width, not the key's.
+    assert_eq!(c[0].width, 40);
+}
+
+#[test]
 fn a_point_on_a_chip_finds_it_and_between_chips_finds_nothing_else() {
     let m = FixedMeasure::new(8);
     let mut b = ChatBuffer::new(params(400));
@@ -4554,6 +4596,87 @@ fn a_point_on_a_chip_finds_it_and_between_chips_finds_nothing_else() {
     let sel = b.select_row(0).unwrap();
     assert_eq!(b.selected_text(&sel), "<al> one", "copying leaves them out");
     assert!(b.search("ok", false).is_empty(), "and so does search");
+}
+
+#[test]
+fn up_and_down_step_through_the_rows_with_a_menu() {
+    use crate::focus::FocusItem;
+    use crate::message::{LoadMoreDirection, MessageKind};
+
+    let m = FixedMeasure::new(10);
+    let mut b = ChatBuffer::new(params(2000));
+    b.set_group_gap_secs(300, &m);
+    let system = |kind| Message {
+        kind,
+        ..Message::system(ParsedText::plain("framing"))
+    };
+    b.append(system(MessageKind::LoadMore(LoadMoreDirection::Older)), &m);
+    let old = b.append(
+        Message {
+            kind: MessageKind::History {
+                server_message_id: 9,
+            },
+            ..said(1, "al", "earlier", 50)
+        },
+        &m,
+    );
+    b.append(system(MessageKind::Divider), &m);
+    let mut body = ParsedText::plain("see a");
+    body.add_link(4..5, "https://a.example");
+    let al = b.append(
+        Message {
+            blocks: vec![Block::Text(body)].into(),
+            ..said(1, "al", "", 100)
+        },
+        &m,
+    );
+    let grouped = b.append(said(1, "al", "more", 110), &m);
+    let joined = b.append(said(0, "", "joined", 120), &m);
+    let bo = b.append(said(2, "bo", "hi", 130), &m);
+    let row = |message| FocusItem::Row { message };
+    let rows = [old, al, grouped, joined, bo].map(row);
+
+    let all = (0, b.len() - 1);
+    let mut seen = vec![b.step_row(None, true, all).unwrap()];
+    while let Some(next) = b.step_row(seen.last(), true, all) {
+        seen.push(next);
+    }
+    assert_eq!(seen, rows, "down, past the framing rows, to the end");
+    let mut back = vec![b.step_row(None, false, all).unwrap()];
+    while let Some(prev) = b.step_row(back.last(), false, all) {
+        back.push(prev);
+    }
+    back.reverse();
+    assert_eq!(back, rows, "up visits the same rows");
+
+    // Rows 4 to 5 on screen: entering starts there, from a row out of
+    // sight too, and a step goes past the screen.
+    let shown = (4, 5);
+    for from in [None, Some(row(old))] {
+        assert_eq!(b.step_row(from.as_ref(), true, shown), Some(row(grouped)));
+        assert_eq!(b.step_row(from.as_ref(), false, shown), Some(row(joined)));
+    }
+    assert_eq!(b.step_row(Some(&row(joined)), true, shown), Some(row(bo)));
+    let speaker = FocusItem::Speaker { message: al };
+    assert_eq!(
+        b.step_row(Some(&speaker), true, all),
+        Some(row(grouped)),
+        "from an item, the next row after its own"
+    );
+
+    // Tab goes on from a row to its items, or the next row's.
+    assert_eq!(
+        b.step_focus(Some(&row(al)), true, all),
+        Some(speaker.clone())
+    );
+    assert_eq!(
+        b.step_focus(Some(&row(grouped)), true, all),
+        Some(FocusItem::Speaker { message: bo })
+    );
+    assert!(matches!(
+        b.step_focus(Some(&row(joined)), false, all),
+        Some(FocusItem::Link { message, .. }) if message == al
+    ));
 }
 
 #[test]

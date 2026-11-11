@@ -79,6 +79,7 @@ main (void)
 
     g_autoptr (RotulusReactions) reactions = rotulus_reactions_new ();
     rotulus_reactions_add (reactions, "+1", 3, TRUE, "thumbs up");
+    rotulus_reactions_add_full (reactions, "emoji:17", "?", 1, FALSE, NULL);
     g_assert_true (rotulus_view_set_reactions (view, second, reactions));
     g_assert_true (rotulus_view_set_reactions (view, second, NULL));
 

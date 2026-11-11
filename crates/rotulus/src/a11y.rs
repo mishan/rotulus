@@ -27,7 +27,7 @@ use rotulus_layout::{Block, Caret, ChatBuffer, LineSource, Linkifier, MessageId,
 
 /// Where one of a row's texts sits in the row's line.
 #[derive(Debug, Clone)]
-struct Part {
+pub(crate) struct Part {
     source: LineSource,
     /// Character offset of the part's first character, relative to the
     /// row.
@@ -103,7 +103,7 @@ impl RowFormat {
             (_, false) => &self.reaction,
             (_, true) => &self.reaction_mine,
         };
-        let label = r.label.as_deref().unwrap_or(&r.key);
+        let label = r.label.as_deref().unwrap_or(r.drawn());
         fill(
             template,
             &[("{label}", label), ("{count}", &r.count.to_string())],
@@ -153,7 +153,7 @@ impl TextModel {
     }
 
     /// The row `id` names, as read aloud, and where its parts start.
-    fn row_text(
+    pub(crate) fn row_text(
         msg: &rotulus_layout::Message,
         reply: Option<&Reply>,
         reactions: &[Reaction],
@@ -1006,18 +1006,21 @@ mod tests {
         let id = b.id_at(0).unwrap();
         let thumbs = Reaction {
             key: "+1".into(),
+            text: None,
             count: 3,
             mine: true,
             label: Some("thumbs up".into()),
         };
         let ok = Reaction {
             key: "ok".into(),
+            text: None,
             count: 1,
             mine: false,
             label: None,
         };
         let bare = |mine| Reaction {
             key: "*".into(),
+            text: None,
             count: 0,
             mine,
             label: Some("star".into()),
@@ -1026,9 +1029,15 @@ mod tests {
             key: "!".into(),
             ..bare(false)
         };
+        let placeholder = Reaction {
+            key: "emoji:17".into(),
+            text: Some("?".into()),
+            label: None,
+            ..bare(false)
+        };
         b.set_reactions(
             id,
-            vec![thumbs, ok, bare(true), unbare],
+            vec![thumbs, ok, bare(true), unbare, placeholder],
             &FixedMeasure::new(8),
         );
         let fmt = RowFormat {
@@ -1038,8 +1047,9 @@ mod tests {
         assert_eq!(
             TextModel::build(&b, &fmt).text(),
             "al: hello\nreactions: thumbs up, 3, including you | ok, 1 | \
-             star, including you | star",
-            "a count it isn't drawn with isn't read either"
+             star, including you | star | ?",
+            "a count it isn't drawn with isn't read either, and without a \
+             label a chip reads as it is drawn"
         );
     }
 

@@ -53,6 +53,12 @@ pub enum MessageKind {
 }
 
 impl MessageKind {
+    /// A row the view draws for itself, a divider or a load-more row,
+    /// rather than a message: it has no row menu.
+    pub fn is_framing(&self) -> bool {
+        matches!(self, MessageKind::Divider | MessageKind::LoadMore(_))
+    }
+
     /// Part of a chat-history block: backfilled messages and the rows that
     /// frame them. These don't count against the scrollback cap — the user
     /// asked for them — and are never trimmed to make room for live rows.
@@ -186,18 +192,28 @@ impl Reply {
 /// One reaction to a row, drawn as a chip under its body: the reaction,
 /// how many made it, and whether you did.
 ///
-/// `key` is the application's: drawn as text, and handed back when the
-/// chip is clicked. It is Unicode emoji today; a custom emoji would add a
-/// media token beside it, drawn from the view's media table as an
-/// [`Block::Image`] is, with the key still the identity.
+/// `key` is the application's: handed back when the chip is clicked, and
+/// drawn as text unless `text` is given. A custom emoji the application
+/// can't draw is given a placeholder as `text`, while its key stays the
+/// identity.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Reaction {
     pub key: String,
+    /// What the chip draws in place of the key.
+    pub text: Option<String>,
     pub count: u32,
     /// Whether one of them is yours, which draws the chip highlighted.
     pub mine: bool,
-    /// What a screen reader calls it ("thumbs up"); the key when `None`.
+    /// What a screen reader calls it ("thumbs up"); what the chip draws
+    /// when `None`.
     pub label: Option<String>,
+}
+
+impl Reaction {
+    /// What the chip draws: its text, or else its key.
+    pub fn drawn(&self) -> &str {
+        self.text.as_deref().unwrap_or(&self.key)
+    }
 }
 
 /// Intrinsic pixel size of an image block, as reported by the decoder.

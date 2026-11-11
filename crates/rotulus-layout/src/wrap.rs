@@ -101,7 +101,7 @@ pub struct ChipBox {
     pub y: u32,
     pub width: u32,
     pub height: u32,
-    /// Where the key's text starts, and the count's after it.
+    /// Where its text or key starts, and the count's after it.
     pub key_x: u32,
     pub count_x: u32,
 }
@@ -637,7 +637,7 @@ fn layout_chips(
     let (mut cx, mut cy) = (x, top);
     let mut out = Vec::with_capacity(reactions.len());
     for r in reactions {
-        let key_w = measure.run_width(&r.key, Style::default());
+        let key_w = measure.run_width(r.drawn(), Style::default());
         let count_w = match r.count {
             0 => 0,
             n => space + measure.run_width(&n.to_string(), Style::default()),
