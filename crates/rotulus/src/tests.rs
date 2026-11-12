@@ -827,6 +827,8 @@ fn gtk_class_and_construction_smoke() {
     check_replies();
     check_reactions();
     check_replace_and_marker();
+    check_reveal();
+    check_spotlight();
     check_text_scale_remeasures();
     check_keyboard_focus();
     check_row_keyboard();
@@ -1424,9 +1426,12 @@ fn check_replies() {
         view.connect_closure(
             "reply-activated",
             false,
-            gtk4::glib::closure_local!(move |_: crate::view::RotulusView, m: RowMark| {
-                seen.borrow_mut().push(format!("reply {}", m.0 .0));
-            }),
+            gtk4::glib::closure_local!(
+                move |_: crate::view::RotulusView, m: RowMark, keyboard: bool| {
+                    let from = if keyboard { "key" } else { "click" };
+                    seen.borrow_mut().push(format!("reply {} {from}", m.0 .0));
+                }
+            ),
         );
     }
     {
@@ -1518,7 +1523,7 @@ fn check_replies() {
     assert_eq!(
         *seen.borrow(),
         [
-            format!("reply {n}"),
+            format!("reply {n} click"),
             format!("row {n}"),
             format!("row {n}"),
             format!("row {n}"),
@@ -1551,7 +1556,10 @@ fn check_replies() {
     seen.borrow_mut().clear();
     assert!(view.activate_focused());
     view.open_focused_menu();
-    assert_eq!(*seen.borrow(), [format!("reply {n}"), format!("row {n}")]);
+    assert_eq!(
+        *seen.borrow(),
+        [format!("reply {n} key"), format!("row {n}")]
+    );
 
     // The Menu key on an image opens its row's menu, though the point the
     // menu opens from, under the image, is on the selected row below.
@@ -2089,6 +2097,126 @@ fn a_mark_in_a_value_is_a_row_and_null_is_none() {
     let null = None::<RowMark>.to_value();
     assert!(null.get::<RowMark>().is_err(), "NULL is no row");
     assert_eq!(null.get::<Option<RowMark>>(), Ok(None));
+}
+
+/// `reveal` brings a row from far above into view, moving keyboard focus
+/// and the accessible caret to it only when asked to.
+fn check_reveal() {
+    use rotulus_layout::FocusItem;
+
+    let view = crate::view::RotulusView::new();
+    let ids: Vec<_> = (0..200)
+        .map(|i| view.append(message_row(1, "al", &format!("line {i}"))))
+        .collect();
+    let holder = laid_out(&view);
+    let window = gtk4::Window::new();
+    window.set_child(Some(&holder));
+    holder.allocate(400, 300, -1, None);
+    let imp = view.imp_ref();
+    let focused = || imp.focus_item.borrow().clone();
+    #[cfg(feature = "v4_14")]
+    let caret_on = || imp.a11y_caret.get().map(|s| s.focus.message);
+    assert!(
+        view.visible_rows().unwrap().0 > 100,
+        "it starts at the bottom"
+    );
+
+    let mut focus_on = None;
+    for (row, focus) in [(100, true), (0, false)] {
+        assert!(view.reveal(ids[row], focus));
+        let (first, last) = view.visible_rows().unwrap();
+        assert!((first..=last).contains(&row), "row {row} is on screen");
+        assert!(!imp.buffer.borrow().is_following(), "it left the bottom");
+        if focus {
+            focus_on = Some(ids[row]);
+        }
+        assert_eq!(
+            focused(),
+            focus_on.map(|message| FocusItem::Row { message }),
+            "focus moves only with focus"
+        );
+        #[cfg(feature = "v4_14")]
+        assert_eq!(caret_on(), focus_on, "and so does the caret");
+    }
+
+    assert!(view.remove(ids[150]));
+    view.set_max_rows(150);
+    assert!(view.reveal(ids[100], false));
+    let shown = view.visible_rows();
+    for (gone, focus) in [(150, false), (150, true), (0, false), (0, true)] {
+        assert!(!view.reveal(ids[gone], focus), "row {gone} is gone");
+    }
+    assert_eq!(view.visible_rows(), shown, "and is no scroll");
+    assert_eq!(
+        focused(),
+        focus_on.map(|message| FocusItem::Row { message })
+    );
+    window.destroy();
+}
+
+/// The spotlight tints its own row alone, and goes when cleared or with
+/// its row.
+fn check_spotlight() {
+    use gtk4::subclass::prelude::WidgetImpl;
+
+    let view = crate::view::RotulusView::new();
+    let ids: Vec<_> = ["one", "two", "three"]
+        .iter()
+        .map(|t| view.append(message_row(1, "al", t)))
+        .collect();
+    let _holder = laid_out(&view);
+    // Pixels right of the text, at the top and the bottom of each row.
+    let pixels = || -> Vec<[u8; 4]> {
+        let snapshot = gtk4::Snapshot::new();
+        view.imp_ref().snapshot(&snapshot);
+        let node = snapshot.to_node().expect("the view draws");
+        let renderer = gtk4::gsk::CairoRenderer::new();
+        #[allow(deprecated)]
+        renderer.realize(None).expect("an offscreen renderer");
+        let out = (0..ids.len() * 2)
+            .map(|i| {
+                let row = i / 2;
+                let (top, h) = {
+                    let mut buf = view.imp_ref().buffer.borrow_mut();
+                    (
+                        buf.index_mut().offset_of(row),
+                        buf.index_mut().height_at(row),
+                    )
+                };
+                let edge = if i % 2 == 0 { 0.0 } else { h as f32 - 1.0 };
+                let y = crate::view::PAD_Y as f32 + top as f32 + edge;
+                let at = gtk4::graphene::Rect::new(300.0, y, 1.0, 1.0);
+                let texture = renderer.render_texture(&node, Some(&at));
+                let mut d = gtk4::gdk::TextureDownloader::new(&texture);
+                d.set_format(gtk4::gdk::MemoryFormat::R8g8b8a8);
+                let (bytes, _) = d.download_bytes();
+                [bytes[0], bytes[1], bytes[2], bytes[3]]
+            })
+            .collect();
+        renderer.unrealize();
+        out
+    };
+    let plain = pixels();
+    assert!(plain.iter().all(|p| *p == plain[0]));
+
+    view.set_spotlight(Some(ids[1]));
+    assert_eq!(view.spotlight(), Some(ids[1]));
+    let lit = pixels();
+    assert!(
+        lit[2..4].iter().zip(&plain[2..4]).all(|(l, p)| l != p),
+        "its row is tinted, top to bottom"
+    );
+    assert_eq!(
+        [&lit[..2], &lit[4..]],
+        [&plain[..2], &plain[4..]],
+        "and no other"
+    );
+
+    view.set_spotlight(None);
+    assert_eq!(pixels(), plain, "cleared, it is gone");
+    view.set_spotlight(Some(ids[1]));
+    assert!(view.remove(ids[1]));
+    assert_eq!(view.spotlight(), None, "it goes with its row");
 }
 
 /// Replacing keeps a row's place and id; the marker follows its row out.

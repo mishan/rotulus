@@ -787,7 +787,7 @@ Clicks reach the application as typed signals, never as a word to match:
 | `speaker-menu (key, x, y)` | secondary click on a nick or avatar | nothing |
 | `load-more (direction)` | click anywhere on a load-more row | nothing |
 | `media-activated (token)` | primary click on an image or its placeholder | nothing |
-| `reply-activated (mark)` | primary click on a reply header | nothing |
+| `reply-activated (mark, keyboard)` | primary click on a reply header, or Enter or Space on a focused one, which `keyboard` tells apart | nothing |
 | `reaction-activated (mark, key)` | primary click on a reaction chip | nothing |
 | `reaction-menu (mark, key, x, y) → handled` | secondary click on a reaction chip | the chip's row's `row-menu` |
 | `row-menu (mark, x, y) → handled` | secondary click on a message, anywhere but a link, a nick, an avatar or the selection, or on a reaction chip whose `reaction-menu` is unhandled | the view pops its own Copy / Select All menu |
@@ -906,6 +906,30 @@ altogether.
 rather than moving to a neighbour, since a marker in the wrong place
 claims something was read that wasn't.
 
+### Going to a row
+
+`rotulus_view_reveal` (`RotulusView::reveal` in Rust) scrolls a row into
+view, near the middle unless it is in view already, and leaves the
+bottom as a manual scroll does, as search does to reach a match; it
+returns false for a row that is gone. With `focus`, keyboard focus moves
+to the row as a whole, as Up and Down move it, with the accessible caret
+and the announcement; a divider or a load-more row is only scrolled to,
+having no menu. Without it, focus stays where it was, since someone
+following a reply with the pointer has not asked to move the keyboard's
+place. That is what `reply-activated`'s `keyboard` is for: true for
+Enter or Space on a focused header, false for a click, so an application jumping
+to the original passes it straight on as `focus`. It is an argument of
+the activation rather than a question about focus asked afterwards,
+since a header can hold focus and still be clicked.
+
+`rotulus_view_set_spotlight` (`set_spotlight`) draws a row on the
+selection's color, `ROTULUS_PAL_MARK_BG`, at half its alpha, to say
+"this one" after a jump: lighter than a selection, so it is never taken
+for one, and with no palette slot of its own, so the palette contract
+stays as it is. The row's text is held to the contrast it has against
+the tint, as against a selection. Like the marker it goes with its row;
+how long it stays is the application's to decide, and nothing animates.
+
 ### Replacing a row
 
 `rotulus_view_replace` swaps a row's content in place, keeping its id and
@@ -955,7 +979,8 @@ wrong: directly under the previous row's text and a line above its own
 nick, a quote looked like the end of the message above, or like its
 author speaking. On the nick's line it can only be the start of this
 row. A row with a header starts a group of its own, so its nick is
-always drawn beside it. A click on it is `reply-activated`; a click past
+always drawn beside it. A click on it, or Enter or Space on it, is
+`reply-activated` (see "Going to a row"); a click past
 its end is nothing, rather than the nick the caret hit-test would find
 on that line. In Tab order the header comes after the speaker, as it is
 drawn and read. Focus on a header that is taken away, or on a speaker

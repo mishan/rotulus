@@ -41,9 +41,9 @@ assert seen == [Rotulus.LoadDirection.OLDER]
 assert view.set_reply(first, "alice", Rotulus.COLOR_DEFAULT, "hello")
 assert view.set_reply_unavailable(first, "gone")
 marked = []
-view.connect("reply-activated", lambda v, mark: marked.append(v.clear_reply(mark)))
+view.connect("reply-activated", lambda v, mark, keyboard: marked.append(keyboard and v.clear_reply(mark)))
 view.connect("row-menu", lambda v, mark, x, y: marked.append(v.clear_reply(mark)) or True)
-view.emit("reply-activated", first)
+view.emit("reply-activated", first, True)
 assert view.emit("row-menu", first, 1.0, 2.0)
 assert marked == [True, True], marked
 
