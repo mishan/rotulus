@@ -658,6 +658,26 @@ GtkWidget *rotulus_view_new (void);
 void rotulus_view_set_palette (RotulusView *self, const GdkRGBA *palette);
 
 /**
+ * rotulus_view_get_text_color:
+ * @self: a view
+ * @color: a palette index, or %ROTULUS_COLOR_DEFAULT for %ROTULUS_PAL_FG
+ * @rgba: (out caller-allocates): the color text in @color is drawn in
+ *
+ * Gets the color text in @color is drawn in, for drawing a nick beside
+ * the view in the color the view gives it. It is what is drawn on the
+ * view's own background now: a slot left to the system is the widget's
+ * CSS color, and a color short of the view's contrast is moved as it is
+ * when drawn. A run with a background of its own, a reversed run, and a
+ * selected or spotlit row are drawn against that instead, so may differ.
+ * It changes with the palette and with the system's colors and contrast;
+ * read it again after [method@Rotulus.View.set_palette], a switch to or
+ * from a dark style, or a change of theme or of the desktop's contrast
+ * setting.
+ */
+void rotulus_view_get_text_color (RotulusView *self, int color,
+                                  GdkRGBA *rgba);
+
+/**
  * rotulus_view_set_font:
  * @self: a view
  * @font: a Pango font description, such as "Monospace 10"

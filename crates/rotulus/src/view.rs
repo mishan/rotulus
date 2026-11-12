@@ -1086,6 +1086,20 @@ impl RotulusView {
         self.queue_draw();
     }
 
+    /// The color text in `color` is drawn in on the view's own background
+    /// now, for an application drawing a nick beside the view in the color
+    /// the view gives it. [`ColorRef::Default`] is the default text color,
+    /// a slot left to the system is the widget's CSS color, and a color
+    /// short of the view's contrast is moved as it is when drawn. A run with
+    /// a background of its own, a reversed run, and a selected or spotlit
+    /// row are drawn against that instead, so may differ. It changes with
+    /// the palette and with the system's colors and contrast: read it again
+    /// after `set_palette`, a switch to or from a dark style, or a change of
+    /// theme or of `gtk-interface-contrast`.
+    pub fn text_color(&self, color: ColorRef) -> gtk4::gdk::RGBA {
+        self.legibility().ink(self.resolve(color, PAL_FG), None)
+    }
+
     fn apply_word_wrap(&self, on: bool) {
         self.imp_().buffer.borrow_mut().set_word_wrap(on);
         self.queue_draw();

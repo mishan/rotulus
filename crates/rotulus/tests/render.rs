@@ -91,6 +91,14 @@ fn palette() -> [gtk::gdk::RGBA; rotulus::view::PALETTE_COLS] {
     p
 }
 
+/// The same roles on a dark background, light text.
+fn dark_palette() -> [gtk::gdk::RGBA; rotulus::view::PALETTE_COLS] {
+    let mut p = palette();
+    p[34] = gtk::gdk::RGBA::new(1.0, 1.0, 1.0, 1.0); // FG
+    p[35] = gtk::gdk::RGBA::new(0.118, 0.118, 0.118, 1.0); // BG
+    p
+}
+
 fn view() -> RotulusView {
     let v = RotulusView::new();
     v.set_palette(&palette());
@@ -361,6 +369,28 @@ fn selection() -> RotulusView {
     v
 }
 
+/// The middle row spotlit, as after a jump to it, between rows that are
+/// not, under a stamp and a nick: on a light palette, then a dark one.
+fn spotlight(palette: [gtk::gdk::RGBA; rotulus::view::PALETTE_COLS]) -> RotulusView {
+    let v = view();
+    v.set_palette(&palette);
+    v.set_time_stamp(true);
+    v.set_stamp_format("%H:%M ");
+    say(&v, 1, "alice", "has anyone tried the new build?", T);
+    say(&v, 2, "bob", "yes, it is quick", T + 20);
+    v.set_spotlight(v.last());
+    say(&v, 3, "carol", "same here", T + 40);
+    v
+}
+
+fn spotlight_light() -> RotulusView {
+    spotlight(palette())
+}
+
+fn spotlight_dark() -> RotulusView {
+    spotlight(dark_palette())
+}
+
 /// Show `view` in a window and render what it draws.
 fn render(view: &RotulusView) -> gtk::gdk::Texture {
     let window = gtk::Window::new();
@@ -544,6 +574,8 @@ fn scenes_draw_and_read_as_promised() {
         ("selection", selection),
         ("replies", replies),
         ("reactions", reactions),
+        ("spotlight-light", spotlight_light),
+        ("spotlight-dark", spotlight_dark),
     ]
     .into_iter()
     .filter_map(|(name, scene)| check(name, &render(&scene())))
