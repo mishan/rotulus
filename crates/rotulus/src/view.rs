@@ -2475,8 +2475,6 @@ impl RotulusView {
         draw(&b.text, text, reply.text_attrs(), muted);
     }
 
-    /// Draw one visual line as a sequence of styled runs.
-    #[allow(clippy::too_many_arguments)]
     /// Draw one visual line as styled runs, highlighting `hl`.
     ///
     /// **The selection is drawn here, inside the same walk that draws
