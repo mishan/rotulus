@@ -83,8 +83,13 @@ main (void)
     g_assert_true (rotulus_view_set_reactions (view, second, reactions));
     g_assert_true (rotulus_view_set_reactions (view, second, NULL));
 
+    g_assert_true (rotulus_view_reveal (view, first, FALSE));
+    rotulus_view_set_spotlight (view, first);
+    rotulus_view_set_spotlight (view, NULL);
+
     g_assert_true (rotulus_view_remove (view, first));
     g_assert_false (rotulus_view_remove (view, first));
+    g_assert_false (rotulus_view_reveal (view, first, TRUE));
     g_assert_false (rotulus_view_set_reply (view, first, "alice",
                                             ROTULUS_COLOR_DEFAULT, "hello"));
 

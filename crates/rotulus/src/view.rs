@@ -53,6 +53,10 @@ pub const PAL_MARKER: usize = 36;
 /// Thickness of the last-read marker, in px.
 const MARKER_HEIGHT: f32 = 2.0;
 
+/// The spotlight is the selection's color at this share of its alpha:
+/// lighter than a selection, so it is never taken for one.
+const SPOTLIGHT_ALPHA: f32 = 0.5;
+
 /// Pixels of slop within which a scroll position counts as "at the
 /// bottom" and resumes following.
 const FOLLOW_SLOP: u32 = 8;
@@ -461,6 +465,8 @@ pub(crate) mod imp {
         pub font: RefCell<String>,
         /// The row the last-read marker is drawn under, if any.
         pub marker: Cell<Option<MessageId>>,
+        /// The row drawn on the spotlight's background, if any.
+        pub spotlight: Cell<Option<MessageId>>,
         /// The accessible text, built when an assistive technology first
         /// asks for it and kept in step with appends from then on.
         #[cfg(feature = "v4_14")]
@@ -516,6 +522,7 @@ pub(crate) mod imp {
                 activate_links: Cell::new(true),
                 font: RefCell::new(DEFAULT_FONT.to_string()),
                 marker: Cell::new(None),
+                spotlight: Cell::new(None),
                 #[cfg(feature = "v4_14")]
                 a11y: RefCell::new(None),
                 #[cfg(feature = "v4_14")]
@@ -607,10 +614,12 @@ pub(crate) mod imp {
                         .build(),
                     // The selection was made, extended or cleared.
                     glib::subclass::Signal::builder("selection-changed").build(),
-                    // (mark) — a primary click on a row's reply header. The
-                    // application knows what the row replies to: it said so.
+                    // (mark, keyboard) — a primary click on a row's reply
+                    // header, or Enter or Space on a focused one, which `keyboard`
+                    // tells apart. The application knows what the row
+                    // replies to: it said so.
                     glib::subclass::Signal::builder("reply-activated")
-                        .param_types([RowMark::static_type()])
+                        .param_types([RowMark::static_type(), bool::static_type()])
                         .build(),
                     // (mark, x, y) -> handled. A secondary click on a row
                     // anywhere a link or a speaker doesn't have a menu of its
@@ -1707,6 +1716,47 @@ impl RotulusView {
         self.imp_().buffer.borrow().row_of(id).map(|_| id)
     }
 
+    /// Draw the row `id` on a tint of the selection's color, or stop.
+    ///
+    /// It says "this one" after a jump to a row, so it goes with its row
+    /// as the marker does; how long it stays is the caller's to decide.
+    pub fn set_spotlight(&self, id: Option<MessageId>) {
+        self.imp_().spotlight.set(id);
+        self.queue_draw();
+    }
+
+    pub fn spotlight(&self) -> Option<MessageId> {
+        let id = self.imp_().spotlight.get()?;
+        self.imp_().buffer.borrow().row_of(id).map(|_| id)
+    }
+
+    /// Scroll the row `id` into view, near the middle unless it is in
+    /// view already, leaving the bottom as a manual scroll does. With
+    /// `focus`, keyboard focus moves to the row and a screen reader reads
+    /// it, as Up and Down would; without, focus stays where it is, since
+    /// a jump the pointer asked for should not move the keyboard's place.
+    ///
+    /// Returns `false` when the row is gone.
+    pub fn reveal(&self, id: MessageId, focus: bool) -> bool {
+        let imp = self.imp_();
+        let Some(framing) = imp.buffer.borrow().message(id).map(|m| m.kind.is_framing()) else {
+            return false;
+        };
+        // A divider or a load-more row has no menu, so it takes no focus,
+        // and a view that cannot take focus tells nobody it has.
+        if focus && !framing && self.grab_focus() {
+            self.set_focus_item(Some(FocusItem::Row { message: id }));
+        } else {
+            let height = content_height(self.height());
+            let m = imp.measure.borrow();
+            imp.buffer.borrow_mut().reveal(id, height, &*m);
+            drop(m);
+            self.sync_adjustment(height);
+            self.queue_draw();
+        }
+        true
+    }
+
     /// The scrollback cap in rows; 0 is no limit.
     pub fn max_rows(&self) -> usize {
         self.imp_().buffer.borrow().max_rows()
@@ -1975,6 +2025,11 @@ impl RotulusView {
         let legibility = self.legibility();
         let stamp_color = legibility.ink(self.pal(PAL_TIMESTAMP), None);
 
+        let spotlight = {
+            let c = self.pal(PAL_MARK_BG);
+            gtk4::gdk::RGBA::new(c.red(), c.green(), c.blue(), c.alpha() * SPOTLIGHT_ALPHA)
+        };
+
         for (row, row_top) in placed {
             let Some(layout) = buf.layout_at(row) else {
                 continue;
@@ -1982,6 +2037,28 @@ impl RotulusView {
             let Some(msg) = buf.message_at(row) else {
                 continue;
             };
+
+            // Under everything else in the row, whose text is then held
+            // to the contrast it has against it.
+            let (legibility, stamp_color) =
+                if imp.spotlight.get().is_some() && imp.spotlight.get() == buf.id_at(row) {
+                    snapshot.append_color(
+                        &spotlight,
+                        &gtk4::graphene::Rect::new(
+                            0.0,
+                            row_top as f32,
+                            content_width(alloc_w) as f32,
+                            layout.height as f32,
+                        ),
+                    );
+                    let l = Legibility {
+                        bg: over(&spotlight, legibility.bg),
+                        ..legibility
+                    };
+                    (l, l.ink(self.pal(PAL_TIMESTAMP), None))
+                } else {
+                    (legibility, stamp_color)
+                };
 
             // The timestamp belongs to the *row*, not to the gutter.
             //
@@ -3780,12 +3857,12 @@ impl RotulusView {
 
     /// Act on a primary click at a widget-space point.
     pub(crate) fn activate_at(&self, x: f64, y: f64) {
-        self.activate(self.hover_target_at(x, y), x, y);
+        self.activate(self.hover_target_at(x, y), x, y, false);
     }
 
     /// Act on `target` as a primary click on it would, at a widget-space
-    /// point a menu can open from.
-    fn activate(&self, target: Option<HoverTarget>, x: f64, y: f64) {
+    /// point a menu can open from; `keyboard` when it came from a key.
+    fn activate(&self, target: Option<HoverTarget>, x: f64, y: f64, keyboard: bool) {
         match target {
             Some(HoverTarget::Link { .. }) if !self.imp_().activate_links.get() => {}
             // A link whose text isn't its address shows where it goes
@@ -3816,7 +3893,7 @@ impl RotulusView {
                 self.emit_by_name::<()>("media-activated", &[&token]);
             }
             Some(HoverTarget::Reply { message }) => {
-                self.emit_by_name::<()>("reply-activated", &[&RowMark(message)]);
+                self.emit_by_name::<()>("reply-activated", &[&RowMark(message), &keyboard]);
             }
             Some(HoverTarget::Reaction { message, key, .. }) => {
                 self.emit_by_name::<()>("reaction-activated", &[&RowMark(message), &key]);
@@ -4371,7 +4448,7 @@ impl RotulusView {
     }
 
     /// The first and last rows on screen.
-    fn visible_rows(&self) -> Option<(usize, usize)> {
+    pub(crate) fn visible_rows(&self) -> Option<(usize, usize)> {
         let height = content_height(self.height());
         let mut buf = self.imp_().buffer.borrow_mut();
         let top = buf.scroll_offset(height);
@@ -4532,7 +4609,7 @@ impl RotulusView {
             return false;
         };
         let (x, y) = self.item_point(&item);
-        self.activate(Some(target), x, y);
+        self.activate(Some(target), x, y, true);
         true
     }
 

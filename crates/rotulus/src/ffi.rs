@@ -790,6 +790,27 @@ pub unsafe extern "C" fn rotulus_view_set_marker(w: CGtkWidget, mark: *mut c_voi
     with_view!(w, v, v.set_marker(ptr_to_mark(mark)))
 }
 
+/// # Safety
+/// `w` is a valid `RotulusView *`; `mark` is a mark or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_set_spotlight(w: CGtkWidget, mark: *mut c_void) {
+    with_view!(w, v, v.set_spotlight(ptr_to_mark(mark)))
+}
+
+/// # Safety
+/// `w` is a valid `RotulusView *`; `mark` is a mark or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_reveal(
+    w: CGtkWidget,
+    mark: *mut c_void,
+    focus: c_int,
+) -> c_int {
+    match (view_of(w), ptr_to_mark(mark)) {
+        (Some(v), Some(id)) => c_int::from(v.reveal(id, focus != 0)),
+        _ => 0,
+    }
+}
+
 // ---- replies --------------------------------------------------------
 
 /// # Safety

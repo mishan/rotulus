@@ -37,6 +37,7 @@ Rotulus is not 1.0 yet, and its API may still change.
   - reply headers quoting the original, and reaction chips
   - markdown code and quote blocks
   - a last-read marker line
+  - going to a row, and spotlighting it
   - a single-column mode for logs
 
   With no colors set, it follows the Adwaita theme. Whatever the colors,

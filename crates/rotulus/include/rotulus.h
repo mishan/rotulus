@@ -136,11 +136,16 @@ GType rotulus_load_direction_get_type (void);
 /**
  * RotulusView::reply-activated:
  * @self: the view
- * @mark: the row whose reply header was clicked
+ * @mark: the row whose reply header was activated
+ * @keyboard: %TRUE for Enter or Space on a focused header, %FALSE for a
+ *   click
  *
  * A primary click on a row's reply header (see
- * [method@Rotulus.View.set_reply]), for the application to show the
- * message the row replies to, which it named when it set the header.
+ * [method@Rotulus.View.set_reply]), or Enter or Space on a focused one, for the
+ * application to show the message the row replies to, which it named
+ * when it set the header. @keyboard is the focus argument of
+ * [method@Rotulus.View.reveal], so focus follows a jump only when the
+ * keyboard asked for it.
  */
 
 /**
@@ -958,6 +963,36 @@ RotulusMark *rotulus_view_get_last (RotulusView *self);
  * The marker goes with its row rather than moving to a neighbour.
  */
 void rotulus_view_set_marker (RotulusView *self, RotulusMark *mark);
+
+/**
+ * rotulus_view_set_spotlight:
+ * @self: a view
+ * @mark: (nullable): the row to draw on a tint of %ROTULUS_PAL_MARK_BG,
+ *   lighter than a selection; %NULL removes it
+ *
+ * Says "this one", as after a jump to the row. It goes with its row, as
+ * the marker does; when to take it away is the application's to decide.
+ */
+void rotulus_view_set_spotlight (RotulusView *self, RotulusMark *mark);
+
+/**
+ * rotulus_view_reveal:
+ * @self: a view
+ * @mark: the row to show
+ * @focus: whether keyboard focus moves to it
+ *
+ * Scrolls the row into view, near the middle unless it is in view
+ * already, leaving the bottom as a manual scroll does. With @focus,
+ * keyboard focus moves to the row, as Up and Down would move it, and a
+ * screen reader reads it, unless it is a divider or a load-more row, which
+ * takes no focus; pass the @keyboard of
+ * [signal@Rotulus.View::reply-activated], so a jump the pointer asked for
+ * leaves focus where it was.
+ *
+ * Returns: %FALSE if the row is gone
+ */
+gboolean rotulus_view_reveal (RotulusView *self, RotulusMark *mark,
+                              gboolean focus);
 
 /* ---- replies ------------------------------------------------------ *
  *
