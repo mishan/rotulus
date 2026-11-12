@@ -829,6 +829,7 @@ fn gtk_class_and_construction_smoke() {
     check_replace_and_marker();
     check_reveal();
     check_spotlight();
+    check_text_color();
     check_text_scale_remeasures();
     check_keyboard_focus();
     check_row_keyboard();
@@ -2217,6 +2218,153 @@ fn check_spotlight() {
     view.set_spotlight(Some(ids[1]));
     assert!(view.remove(ids[1]));
     assert_eq!(view.spotlight(), None, "it goes with its row");
+}
+
+/// Every text node under `node`, by its color.
+fn text_colors(node: &gtk4::gsk::RenderNode, out: &mut Vec<gtk4::gdk::RGBA>) {
+    use gtk4::gsk;
+    if let Some(t) = node.downcast_ref::<gsk::TextNode>() {
+        out.push(t.color());
+    } else if let Some(c) = node.downcast_ref::<gsk::ContainerNode>() {
+        for i in 0..c.n_children() {
+            text_colors(&c.child(i), out);
+        }
+    } else if let Some(t) = node.downcast_ref::<gsk::TransformNode>() {
+        text_colors(&t.child(), out);
+    } else if let Some(c) = node.downcast_ref::<gsk::ClipNode>() {
+        text_colors(&c.child(), out);
+    } else if let Some(c) = node.downcast_ref::<gsk::RoundedClipNode>() {
+        text_colors(&c.child(), out);
+    } else if let Some(o) = node.downcast_ref::<gsk::OpacityNode>() {
+        text_colors(&o.child(), out);
+    }
+}
+
+/// `text_color` is the color a row's text in that color is drawn in, from
+/// Rust and from C.
+fn check_text_color() {
+    use gtk4::gdk::RGBA;
+    use gtk4::subclass::prelude::WidgetImpl;
+    use rotulus_layout::{ColorRef, ParsedText, Span, Style};
+
+    let view = crate::view::RotulusView::new();
+    view.set_time_stamp(false);
+    let _holder = laid_out(&view);
+    let drawn = |color: ColorRef| {
+        let styled = |text: &str| ParsedText {
+            text: text.into(),
+            spans: vec![Span {
+                range: 0..text.len(),
+                style: Style {
+                    fg: color,
+                    ..Style::default()
+                },
+            }],
+            links: Vec::new(),
+        };
+        view.clear();
+        let mut row = message_row(1, "al", "");
+        row.gutter = Some(styled("<al>"));
+        row.blocks = vec![rotulus_layout::Block::Text(styled("hello"))].into();
+        let id = view.append(row);
+        // A quoted nick's default is the nick color, not the text color,
+        // so only a color named outright is the same there.
+        if color != ColorRef::Default {
+            let quote = rotulus_layout::Reply::Quote {
+                nick: "bo".into(),
+                color,
+                excerpt: String::new(),
+            };
+            assert!(view.set_reply(id, Some(quote)));
+        }
+        laid_out(&view);
+        let snapshot = gtk4::Snapshot::new();
+        view.imp_ref().snapshot(&snapshot);
+        let mut out = Vec::new();
+        text_colors(&snapshot.to_node().expect("the view draws"), &mut out);
+        out
+    };
+    let near = |a: &RGBA, b: &RGBA| {
+        [
+            (a.red(), b.red()),
+            (a.green(), b.green()),
+            (a.blue(), b.blue()),
+            (a.alpha(), b.alpha()),
+        ]
+        .iter()
+        .all(|(x, y)| (x - y).abs() < 1.0 / 512.0)
+    };
+    let raw = view.upcast_ref::<gtk4::Widget>().as_ptr() as *mut _;
+    let yellow = RGBA::new(1.0, 1.0, 0.0, 1.0);
+    let follow = RGBA::new(0.0, 0.0, 0.0, 0.0);
+    // (case, the slot set, what it is set to, the color asked for, and
+    // the same as C names it, when it can)
+    let cases = [
+        (
+            "a legible slot",
+            47,
+            RGBA::new(0.1, 0.3, 0.6, 1.0),
+            ColorRef::Palette(47),
+            Some(47),
+        ),
+        (
+            "a slot short of the contrast",
+            47,
+            yellow,
+            ColorRef::Palette(47),
+            Some(47),
+        ),
+        (
+            "a slot left to the system",
+            40,
+            follow,
+            ColorRef::Palette(40),
+            Some(40),
+        ),
+        (
+            "the default text color",
+            crate::view::PAL_FG,
+            RGBA::new(0.4, 0.0, 0.0, 1.0),
+            ColorRef::Default,
+            Some(-1),
+        ),
+        ("a literal", 47, yellow, ColorRef::Rgb(0x1c71d8), None),
+    ];
+    for (case, slot, set, color, c_color) in cases {
+        let mut pal = crate::view::default_palette();
+        pal[crate::view::PAL_BG] = RGBA::WHITE;
+        pal[slot] = set;
+        view.set_palette(&pal);
+        let got = view.text_color(color);
+        let seen = drawn(color);
+        let texts = if color == ColorRef::Default { 2 } else { 3 };
+        assert!(
+            seen.len() >= texts,
+            "{case}: the nick, the body and any quoted nick are drawn"
+        );
+        assert!(
+            seen.iter().all(|s| near(s, &got)),
+            "{case}: drawn in {seen:?}, said to be {got}"
+        );
+        if color == ColorRef::Palette(47) && set == yellow {
+            assert_ne!(got, yellow, "{case}: moved until it reads");
+        }
+        let Some(c_color) = c_color else {
+            continue;
+        };
+        let mut from_c = gtk4::gdk::ffi::GdkRGBA {
+            red: 0.0,
+            green: 0.0,
+            blue: 0.0,
+            alpha: 0.0,
+        };
+        unsafe { crate::ffi::rotulus_view_get_text_color(raw, c_color, &mut from_c) };
+        let from_c = RGBA::new(from_c.red, from_c.green, from_c.blue, from_c.alpha);
+        assert!(
+            near(&from_c, &got),
+            "{case}: C is told {from_c}, Rust {got}"
+        );
+    }
 }
 
 /// Replacing keeps a row's place and id; the marker follows its row out.

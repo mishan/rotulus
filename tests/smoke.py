@@ -65,5 +65,6 @@ assert list(view.get_property("link-schemes")) == ["https://", "irc://"]
 
 palette = [Gdk.RGBA() for _ in range(Rotulus.PAL_COLS)]
 view.set_palette(palette)
+assert view.get_text_color(Rotulus.PAL_NICK_COLOR0).alpha > 0
 
 print("ok")

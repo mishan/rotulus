@@ -83,6 +83,10 @@ main (void)
     g_assert_true (rotulus_view_set_reactions (view, second, reactions));
     g_assert_true (rotulus_view_set_reactions (view, second, NULL));
 
+    GdkRGBA nick_color = { 0 };
+    rotulus_view_get_text_color (view, ROTULUS_PAL_NICK_COLOR0, &nick_color);
+    g_assert_cmpfloat (nick_color.alpha, >, 0.0);
+
     g_assert_true (rotulus_view_reveal (view, first, FALSE));
     rotulus_view_set_spotlight (view, first);
     rotulus_view_set_spotlight (view, NULL);

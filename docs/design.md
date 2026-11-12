@@ -216,6 +216,21 @@ through CSS (`@view_bg_color`, say) has to pass that color as the
 palette's background too (`ROTULUS_PAL_BG`), or the check measures
 against Adwaita's stand-in instead of what is really there.
 
+An application drawing a nick outside the view, such as "Replying to
+alice" over the input, asks the view what it draws it in:
+`rotulus_view_get_text_color` (`RotulusView::text_color`) takes the
+palette index the nick's run was given, or `ROTULUS_COLOR_DEFAULT`, and
+answers with the color after both steps above: a slot left to the system
+as the CSS color, and a color short of the contrast as moved. It answers
+for the view's own background, which a bar beside it is usually near; a
+run with a background of its own, a reversed run, and a selected or
+spotlit row are drawn against that instead. The answer is the view's
+now, so it is asked again whenever what goes into it changes: the
+palette, which the application sets, or the system's colors and
+contrast, which an application already follows to restyle itself (a
+dark style, a theme, `gtk-interface-contrast`). There is no signal for
+it, since the view itself only rereads them as it draws.
+
 `rotulus.h` is the sole definition of that contract. Nothing at the FFI
 boundary checks the palette's length — `ffi.rs` reads `PALETTE_COLS`
 entries from the C array — so a rotulus test reads the defines out of
@@ -1203,7 +1218,8 @@ paint, resize and scroll times unchanged.
 ### Render tests
 
 `crates/rotulus/tests/render.rs` draws scenes — two columns, one column
-with IRC formatting, history with a marker, a selection — through a real
+with IRC formatting, history with a marker, a selection, a spotlight on a
+light palette and on a dark one — through a real
 window and compares them with `crates/rotulus/tests/golden/`. The font is
 bundled (DejaVu Sans Mono, with its license) and pinned through
 fontconfig, the renderer is cairo, the zone UTC, and the comparison is at

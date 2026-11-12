@@ -491,6 +491,33 @@ pub unsafe extern "C" fn rotulus_view_set_palette(
 }
 
 /// # Safety
+/// `w` is a valid `RotulusView *`; `rgba` points to a `GdkRGBA`.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_get_text_color(
+    w: CGtkWidget,
+    color: c_int,
+    rgba: *mut gtk4::gdk::ffi::GdkRGBA,
+) {
+    if rgba.is_null() {
+        return;
+    }
+    let color = if color < 0 {
+        ColorRef::Default
+    } else {
+        ColorRef::Palette(color.min(255) as u8)
+    };
+    with_view!(w, v, {
+        let c = v.text_color(color);
+        *rgba = gtk4::gdk::ffi::GdkRGBA {
+            red: c.red(),
+            green: c.green(),
+            blue: c.blue(),
+            alpha: c.alpha(),
+        };
+    })
+}
+
+/// # Safety
 /// `w` is a valid `RotulusView *`; `font` is a NUL-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn rotulus_view_set_font(w: CGtkWidget, font: *const c_char) {
