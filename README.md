@@ -143,7 +143,7 @@ signals:
 - `load-more`
 - `media-activated`
 - `reply-activated`, `reaction-activated`, `reaction-menu`, `row-menu`
-- `selection-changed`
+- `selection-changed`, `visible-rows-changed`
 
 The API reference for C and the language bindings is at
 <https://mishan.github.io/rotulus/>; the Rust API is on

@@ -689,6 +689,19 @@ everything, Ctrl+C copies, and Escape drops the item focus and the
 selection. With GTK 4.14 the accessible caret moves to the focused item
 and the view announces its text and what it is ("link", "user").
 
+`rotulus_view_get_focus_row` (`focus_row`) is the row the keyboard is
+on, whichever of its items: the row as a whole, its speaker, header, a
+link, an image, a chip, or a load-more row; none while the view is not
+its window's focus or focus is on the view as a whole. It is a getter
+with no signal, for an application offering a key of its own on the
+row, such as R to reply, which reads it as the key arrives. The view
+leaves plain letters alone. A key controller the application adds to
+the view runs before the view's own in either phase, since GTK runs a
+widget's newest controller first, so it can take any key first; one on
+an ancestor in the bubble phase sees only the keys the view left. Ctrl+C
+on a selection and the paging keys are taken before either, on the
+window in the capture phase (see "Keyboard paging").
+
 **An application that takes the view out of the focus chain**
 (`gtk_widget_set_can_focus (view, FALSE)`, to keep focus in the input)
 takes all of that away from keyboard users. The paging keys and
@@ -807,6 +820,7 @@ Clicks reach the application as typed signals, never as a word to match:
 | `reaction-menu (mark, key, x, y) → handled` | secondary click on a reaction chip | the chip's row's `row-menu` |
 | `row-menu (mark, x, y) → handled` | secondary click on a message, anywhere but a link, a nick, an avatar or the selection, or on a reaction chip whose `reaction-menu` is unhandled | the view pops its own Copy / Select All menu |
 | `selection-changed` | the selection is made, extended or cleared | — |
+| `visible-rows-changed` | after a frame that changed the first or last row in view | — |
 
 They replaced xtext's `word-click`, which handed every click over as the
 whitespace-delimited word under it and left the application to demux by
@@ -944,6 +958,25 @@ for one, and with no palette slot of its own, so the palette contract
 stays as it is. The row's text is held to the contrast it has against
 the tint, as against a selection. Like the marker it goes with its row;
 how long it stays is the application's to decide, and nothing animates.
+
+To take it away once its row has been scrolled out of sight, the
+application asks which rows are in view: `rotulus_view_get_visible_rows`
+(`visible_rows`) answers with the first and last row with any pixel in
+the viewport, in the order shown, and `rotulus_view_is_row_visible`
+(`is_row_visible`) about one row. Both are needed, since a mark says
+nothing of where its row is: history inserted above has newer marks than
+the rows under it. Dividers and load-more rows are rows like any other
+here. `visible-rows-changed` follows a scroll, a resize, rows added or
+trimmed, or a reveal that changed the first or last row, once after the
+frame that drew it: from an idle rather than the frame, since a handler
+that scrolls or appends from inside the paint would reconfigure the
+adjustment mid-frame, and only when the pair differs from what it last
+told, so a frame that moves nothing costs a comparison and several
+frames before the idle are told of once. An unmapped view draws no
+frames and so tells nothing; the answer itself is the viewport's
+whether the view is mapped or not, so a background tab keeps its
+spotlight, and a view not yet given a size has none in view. An application fetching reply quotes for the rows on screen
+alone reads the same answer.
 
 ### Replacing a row
 
