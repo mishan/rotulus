@@ -831,6 +831,7 @@ fn gtk_class_and_construction_smoke() {
     check_spotlight();
     check_visible_rows();
     check_focus_row();
+    check_paging_keys();
     check_text_color();
     check_text_scale_remeasures();
     check_keyboard_focus();
@@ -2440,6 +2441,54 @@ fn check_focus_row() {
     gtk4::prelude::GtkWindowExt::set_focus(&window, None::<&gtk4::Widget>);
     assert_eq!(view.focus_row(), None, "focus gone from the view");
     assert_eq!(from_c(), None);
+    window.destroy();
+}
+
+/// From a text field, Page Up and Page Down page the log, with Shift or
+/// without; with Ctrl they are left to the application, whose tabs and
+/// panes they move.
+fn check_paging_keys() {
+    use gtk4::gdk::{Key, ModifierType as M};
+    use gtk4::glib::translate::IntoGlib;
+
+    let view = crate::view::RotulusView::new();
+    let input = gtk4::Entry::new();
+    let column = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    view.set_vexpand(true);
+    column.append(&view);
+    column.append(&input);
+    let window = gtk4::Window::new();
+    window.set_default_size(400, 300);
+    window.set_child(Some(&column));
+    window.present();
+    input.grab_focus();
+    while gtk4::glib::MainContext::default().iteration(false) {}
+    assert!(view.is_mapped());
+
+    let keys = window
+        .observe_controllers()
+        .into_iter()
+        .filter_map(|c| c.ok()?.downcast::<gtk4::EventControllerKey>().ok())
+        .filter(|c| c.propagation_phase() == gtk4::PropagationPhase::Capture)
+        .collect::<Vec<_>>();
+    for (state, taken) in [
+        (M::empty(), true),
+        (M::SHIFT_MASK, true),
+        (M::CONTROL_MASK, false),
+        (M::CONTROL_MASK | M::SHIFT_MASK, false),
+    ] {
+        for key in [
+            Key::Page_Up,
+            Key::Page_Down,
+            Key::KP_Page_Up,
+            Key::KP_Page_Down,
+        ] {
+            let handled = keys
+                .iter()
+                .any(|c| c.emit_by_name::<bool>("key-pressed", &[&key.into_glib(), &0u32, &state]));
+            assert_eq!(handled, taken, "{key:?} with {state:?}");
+        }
+    }
     window.destroy();
 }
 
