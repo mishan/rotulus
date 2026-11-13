@@ -3272,7 +3272,8 @@ impl RotulusView {
     /// The steal is narrow on purpose. It only applies when focus is in
     /// a text-entry widget — the message input or the subject entry,
     /// where paging means nothing — so the user list keeps its own
-    /// page-by-page keyboard navigation.
+    /// page-by-page keyboard navigation. With Ctrl the page keys are left
+    /// alone.
     fn handle_scroll_key(
         &self,
         c: &gtk4::EventControllerKey,
@@ -3288,9 +3289,11 @@ impl RotulusView {
         let ctrl = state.contains(gtk4::gdk::ModifierType::CONTROL_MASK);
         let shift = state.contains(gtk4::gdk::ModifierType::SHIFT_MASK);
 
+        // Ctrl+PgUp/PgDn are an application's, switching its tabs, and
+        // Ctrl+Shift+PgUp/PgDn moving them.
         let action = match keyval {
-            Key::Page_Up | Key::KP_Page_Up => ScrollKey::Page(-1),
-            Key::Page_Down | Key::KP_Page_Down => ScrollKey::Page(1),
+            Key::Page_Up | Key::KP_Page_Up if !ctrl => ScrollKey::Page(-1),
+            Key::Page_Down | Key::KP_Page_Down if !ctrl => ScrollKey::Page(1),
             Key::Home | Key::KP_Home if ctrl => ScrollKey::Home,
             Key::End | Key::KP_End if ctrl => ScrollKey::End,
             _ => return false,

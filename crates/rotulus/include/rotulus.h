@@ -1072,7 +1072,8 @@ gboolean rotulus_view_is_row_visible (RotulusView *self, RotulusMark *mark);
  * first; one on an ancestor, in the bubble phase, sees only what the
  * view leaves, and the view leaves plain letters. Ctrl+C on a selection
  * and the paging keys are the exception: the view takes them on its
- * window, in the capture phase, before any of these.
+ * window, in the capture phase, before any of these. It leaves Page Up
+ * and Page Down with Ctrl held to the application.
  *
  * Returns: (transfer none) (nullable): the row, or %NULL when the view
  *   is not its window's focus or focus is on the view as a whole

@@ -644,8 +644,11 @@ is in a text-entry widget — a message input or a subject entry, where
 paging means nothing — so a list beside the view, such as a user list,
 keeps its own page-by-page navigation. Shift+PgUp/PgDn, the long-standing
 IRC binding for "scroll the log", is unambiguous anywhere and bypasses the
-focus check. Ctrl+Home/End jump to the top of the scrollback and back to
-following the tail. A view that is not mapped (a background tab, a closed
+focus check. With Ctrl the page keys are never taken, but left to the
+application, which switches its tabs with Ctrl+PgUp/PgDn and moves them
+with Ctrl+Shift+PgUp/PgDn, from an input as from anywhere else.
+Ctrl+Home/End jump to the top of the scrollback and back to following
+the tail. A view that is not mapped (a background tab, a closed
 private chat) must not eat the window's keys, so the handler checks that
 first. A page scroll keeps one line of overlap, so the line being read
 survives the jump. The same keys scroll when the view itself has focus.
