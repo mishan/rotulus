@@ -787,6 +787,19 @@ mod glue {
         }
 
         pub(crate) fn a11y_announce(&self, message: &str) {
+            use gtk4::glib::translate::{from_glib_full, ToGlibPtr};
+            // Where there is no accessibility bus GTK falls back to its test
+            // context, which has no announce, and GTK calls it regardless.
+            // The pointer is read directly because with GTK_A11Y=none there
+            // is no context, which at_context() does not allow for.
+            let context: Option<gtk4::ATContext> = unsafe {
+                from_glib_full(gtk4::ffi::gtk_accessible_get_at_context(
+                    self.upcast_ref::<gtk4::Accessible>().to_glib_none().0,
+                ))
+            };
+            if context.is_some_and(|c| c.type_().name() == "GtkTestATContext") {
+                return;
+            }
             self.announce(message, gtk4::AccessibleAnnouncementPriority::Medium);
         }
     }
