@@ -1104,7 +1104,9 @@ The caret is the selection's end when there is a selection, the current
 match once a search reveals one (selected, for the reader, but not
 painted as a selection), and otherwise the start of the newest row, since
 the end of a log is what is being read. A change of zoom is announced as
-its percentage. With GTK 4.16 (the `v4_16` feature) the view also reports
+its percentage. Where there is no accessibility bus, GTK gives the view
+its test context, which cannot announce, and the view says nothing.
+With GTK 4.16 (the `v4_16` feature) the view also reports
 where on screen a range of the text is, and which character is under a
 point, so a magnifier can follow it. The text is built the first time an assistive
 technology asks and kept in step from then on, row by row: an append, a
