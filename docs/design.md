@@ -932,7 +932,7 @@ altogether.
 
 `rotulus_view_set_marker` draws a rule under a row, in
 `ROTULUS_PAL_MARKER`. It goes with its row — removed, trimmed or cleared —
-rather than moving to a neighbour, since a marker in the wrong place
+rather than moving to a neighbor, since a marker in the wrong place
 claims something was read that wasn't.
 
 ### Going to a row

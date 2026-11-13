@@ -13,9 +13,9 @@
 //! button state, drag, or double-click. It answers three questions and
 //! the widget does the rest:
 //!
-//! - where in the document is this pixel? ([`ChatBuffer::hit_test`])
+//! - where in the document is this pixel? ([`ChatBuffer::hit_test`](crate::ChatBuffer::hit_test))
 //! - what does the region between two carets look like? ([`Selection`])
-//! - what text does that region contain? ([`ChatBuffer::selected_text`])
+//! - what text does that region contain? ([`ChatBuffer::selected_text`](crate::ChatBuffer::selected_text))
 
 use crate::message::MessageId;
 use crate::wrap::LineSource;

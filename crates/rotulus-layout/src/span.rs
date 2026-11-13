@@ -76,7 +76,7 @@ impl std::fmt::Debug for Attrs {
     }
 }
 
-/// Where a colour comes from.
+/// Where a color comes from.
 ///
 /// `Palette` indices 0..31 are the mIRC colors, which is how IRC
 /// formatting (`rotulus-mirc`) addresses them; the slots above are the
@@ -89,7 +89,7 @@ pub enum ColorRef {
     Default,
     /// A palette slot.
     Palette(u8),
-    /// A literal colour, `0x00RRGGBB`.
+    /// A literal color, `0x00RRGGBB`.
     Rgb(u32),
 }
 
@@ -147,7 +147,7 @@ pub struct ParsedText {
     /// The text to draw, with all markup removed.
     pub text: String,
     /// Styled runs, sorted by start offset and non-overlapping. Runs with
-    /// a wholly default style are omitted rather than materialised, so a
+    /// a wholly default style are omitted rather than materialized, so a
     /// plain message parses to zero spans.
     pub spans: Vec<Span>,
     /// Link targets, indexed by [`LinkId`].
@@ -399,7 +399,7 @@ impl SpanBuilder {
 }
 
 /// A style with a link attached. Underlined so links read as links
-/// regardless of what colour the message already carries.
+/// regardless of what color the message already carries.
 fn link_style(base: Style, id: LinkId) -> Style {
     let mut s = base;
     s.link = Some(id);

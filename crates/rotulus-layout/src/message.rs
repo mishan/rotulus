@@ -343,9 +343,9 @@ pub struct MessageFlags(pub u8);
 
 impl MessageFlags {
     pub const NONE: MessageFlags = MessageFlags(0);
-    /// Matched the highlight word list — the whole row draws emphasised.
+    /// Matched the highlight word list — the whole row draws emphasized.
     pub const HIGHLIGHT: MessageFlags = MessageFlags(1 << 0);
-    /// Backfilled history: drawn in the muted secondary colour.
+    /// Backfilled history: drawn in the muted secondary color.
     pub const MUTED: MessageFlags = MessageFlags(1 << 1);
     /// A `/me` action: "* nick does something", no nick column.
     pub const ACTION: MessageFlags = MessageFlags(1 << 2);
@@ -361,7 +361,7 @@ impl MessageFlags {
     /// A continuation of the row above: same speaker, close in time, so
     /// the gutter is suppressed and only the body draws. Set by
     /// [`ChatBuffer`](crate::ChatBuffer), never by the caller — it is a
-    /// property of a message's *neighbours*, not of the message, and
+    /// property of a message's *neighbors*, not of the message, and
     /// gets recomputed when they change.
     pub const GROUPED: MessageFlags = MessageFlags(1 << 5);
 
@@ -482,7 +482,7 @@ impl Message {
 
     /// The plain text of the whole message, blocks joined by newlines.
     /// Used for clipboard extraction and for the search index; image
-    /// blocks contribute their alt text, which is the behaviour xtext
+    /// blocks contribute their alt text, which is the behavior xtext
     /// approximated by storing the placeholder as `ent->str`.
     pub fn to_plain_text(&self) -> String {
         let mut out = String::new();

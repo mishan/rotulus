@@ -98,7 +98,7 @@ pub struct ChatBuffer {
     /// rebuild for the batch rather than one per row, which is the case
     /// that actually matters. (xtext did a full linear scan *per*
     /// lookup — `gtk_xtext_find_media_entry_by_token`, xtext.c:6386 —
-    /// so even the unamortised path is no worse.)
+    /// so even the unamortized path is no worse.)
     ///
     /// Trimming is the exception. It only ever removes rows from the front,
     /// which shifts every surviving position down by the same amount, so
@@ -148,7 +148,7 @@ pub struct ChatBuffer {
     /// silently undo a narrowing the user had just made by hand (and a
     /// widening only stuck because it happened to exceed
     /// `max_auto_indent`, which switched the auto path off as a side
-    /// effect). An explicit pin is the behaviour that was being
+    /// effect). An explicit pin is the behavior that was being
     /// approximated.
     indent_pinned: bool,
 }
@@ -660,7 +660,7 @@ impl ChatBuffer {
     }
 
     /// Grouping controls. 0 disables it; rows already in the buffer are
-    /// re-evaluated, since the flag describes neighbours rather than the
+    /// re-evaluated, since the flag describes neighbors rather than the
     /// message itself.
     pub fn set_group_gap_secs(&mut self, secs: i64, measure: &dyn TextMeasure) {
         if secs == self.group_gap_secs {
@@ -710,7 +710,7 @@ impl ChatBuffer {
 
     /// Recompute the GROUPED flag for `rows` (clamped to the buffer).
     ///
-    /// Needed because the flag is a property of a message's *neighbours*.
+    /// Needed because the flag is a property of a message's *neighbors*.
     /// Trimming can delete a run's head, leaving rows that suppress their
     /// nick with nothing above them to have shown it — a speaker's
     /// messages appearing anonymously. Inserting can split a run the same
@@ -1050,7 +1050,7 @@ impl ChatBuffer {
 
     /// The whitespace-delimited word around a caret.
     ///
-    /// Tokenised like xtext's `is_del` macro: space, newline, `<`, `>`
+    /// Tokenized like xtext's `is_del` macro: space, newline, `<`, `>`
     /// and NUL. The angle brackets are what let `<nick>` split into a
     /// bare nick when it is double-clicked.
     pub fn word_at(&self, caret: &Caret) -> Option<String> {
@@ -1298,7 +1298,7 @@ impl ChatBuffer {
             .collect()
     }
 
-    /// Scroll so `id` is on screen, centred if it isn't already visible.
+    /// Scroll so `id` is on screen, centered if it isn't already visible.
     ///
     /// Leaves an already-visible row where it is. Yanking the viewport
     /// on every step would make walking a cluster of matches in one

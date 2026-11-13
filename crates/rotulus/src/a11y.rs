@@ -147,7 +147,7 @@ impl TextModel {
     }
 
     /// Append the row `id` names. Returns the character range inserted,
-    /// including the newline that separates it from its neighbour.
+    /// including the newline that separates it from its neighbor.
     pub(crate) fn push(&mut self, buf: &ChatBuffer, id: MessageId, fmt: &RowFormat) -> (u32, u32) {
         self.insert_row(buf, self.rows.len(), id, fmt)
     }

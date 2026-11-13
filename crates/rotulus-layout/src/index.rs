@@ -18,7 +18,7 @@
 //! chunk caching its own summed height, with a lazily-repaired running
 //! prefix over the chunks. Front insert pushes a chunk; trim pops one;
 //! neither touches the rest. A lookup binary-searches the chunk prefixes
-//! and then scans within one chunk, which is bounded by [`CHUNK_TARGET`].
+//! and then scans within one chunk, which is bounded by `CHUNK_TARGET`.
 //!
 //! **Estimated heights.** A row that has never been laid out reports an
 //! estimate rather than forcing a measure, so a resize costs O(visible)
@@ -388,7 +388,7 @@ impl HeightIndex {
 
     /// Rebuild the stale tail of the chunk prefix sums.
     ///
-    /// Amortised: a batch of appends invalidates once and repairs once,
+    /// Amortized: a batch of appends invalidates once and repairs once,
     /// on the next query, rather than repairing per append.
     fn repair_prefix(&mut self) {
         let n = self.chunks.len();

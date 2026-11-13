@@ -900,7 +900,7 @@ fn measure_styled(p: &ParsedText, range: Range<usize>, measure: &dyn TextMeasure
     total
 }
 
-/// Largest prefix of `range` fitting in `max_width`, honouring every
+/// Largest prefix of `range` fitting in `max_width`, honoring every
 /// style change inside it.
 ///
 /// The naive version — measure the whole rest with the style in effect
@@ -1091,7 +1091,7 @@ pub fn estimate_row_height(
     header + estimate_height(msg, params, measure) + chips
 }
 
-/// Whether a message draws in the muted secondary colour.
+/// Whether a message draws in the muted secondary color.
 pub fn is_muted(msg: &Message) -> bool {
     msg.flags.contains(MessageFlags::MUTED) || msg.flags.contains(MessageFlags::DELETED)
 }

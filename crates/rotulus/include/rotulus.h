@@ -458,7 +458,7 @@ typedef struct {
  * RotulusRowKind:
  * @ROTULUS_ROW_MESSAGE: a message someone sent
  * @ROTULUS_ROW_SYSTEM: a notice the application generated; never groups
- *   with its neighbours, even when they share a tag
+ *   with its neighbors, even when they share a tag
  * @ROTULUS_ROW_HISTORY: a message loaded from history; doesn't count
  *   against [property@Rotulus.View:max-lines], and is never trimmed to make room for
  *   live rows
@@ -993,7 +993,7 @@ RotulusMark *rotulus_view_get_last (RotulusView *self);
  * @mark: (nullable): the row to draw the last-read marker under; %NULL
  *   removes it
  *
- * The marker goes with its row rather than moving to a neighbour.
+ * The marker goes with its row rather than moving to a neighbor.
  */
 void rotulus_view_set_marker (RotulusView *self, RotulusMark *mark);
 
