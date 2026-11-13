@@ -33,13 +33,13 @@ pub const PAL_BG: usize = 35;
 /// `ROTULUS_PAL_MUTED` — secondary text: history, captions.
 pub const PAL_HISTORY_MUTED: usize = 37;
 /// `ROTULUS_PAL_TIMESTAMP` — the timestamp column. Themes default it to
-/// the secondary text colour so the stamps recede behind the message
+/// the secondary text color so the stamps recede behind the message
 /// text rather than competing with it.
 pub const PAL_TIMESTAMP: usize = 38;
 /// `ROTULUS_PAL_RULE` — the column divider. Themes default it to the text
 /// color, which is how it was always drawn.
 pub const PAL_RULE: usize = 46;
-/// `ROTULUS_PAL_MARK_FG` / `_MARK_BG` — the selection colours, filled by
+/// `ROTULUS_PAL_MARK_FG` / `_MARK_BG` — the selection colors, filled by
 /// the theme exactly as they were for xtext.
 pub const PAL_MARK_FG: usize = 32;
 pub const PAL_MARK_BG: usize = 33;
@@ -178,7 +178,7 @@ impl From<rotulus_layout::LoadMoreDirection> for LoadDirection {
 ///
 /// One type for both cases on purpose. Links and nicks want the same
 /// affordance — underline on hover, a pointer cursor, a menu on
-/// right-click — and modelling them separately is how the two end up
+/// right-click — and modeling them separately is how the two end up
 /// underlining under subtly different conditions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HoverTarget {
@@ -247,7 +247,7 @@ impl HoverTarget {
     }
 }
 
-/// What, if anything, recolours a run of text.
+/// What, if anything, recolors a run of text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mark {
     None,
@@ -297,7 +297,7 @@ const WHEEL_LINES: f64 = 3.0;
 /// parsing it. The tint is what actually says "this is code".
 ///
 /// Derived from the theme foreground at low alpha rather than a fixed
-/// grey, so it reads on light and dark without a second colour to keep
+/// gray, so it reads on light and dark without a second color to keep
 /// in step.
 const CODE_BG_ALPHA: f32 = 0.10;
 const CODE_BORDER_ALPHA: f32 = 0.22;
@@ -1141,7 +1141,7 @@ impl RotulusView {
 
     /// Gap that breaks a run of messages from one speaker; 0 disables
     /// grouping. Re-decides the rows already in the buffer, since the
-    /// flag describes neighbours rather than messages.
+    /// flag describes neighbors rather than messages.
     fn apply_group_gap_secs(&self, secs: i64) {
         let m = self.imp_().measure.borrow();
         self.imp_()
@@ -1723,7 +1723,7 @@ impl RotulusView {
     /// Draw the last-read marker under the row `id`, or remove it.
     ///
     /// The marker goes when its row does — trimmed, removed or cleared —
-    /// rather than jumping to a neighbour, since a marker in the wrong
+    /// rather than jumping to a neighbor, since a marker in the wrong
     /// place claims something was read that wasn't.
     pub fn set_marker(&self, id: Option<MessageId>) {
         self.imp_().marker.set(id);
@@ -3511,11 +3511,11 @@ impl RotulusView {
 
     /// The selected text, or empty.
     ///
-    /// Honours `autocopy_stamp`: when on, each copied row is prefixed
+    /// Honors `autocopy_stamp`: when on, each copied row is prefixed
     /// with its timestamp, which is what xtext's `mark_stamp` did. The
     /// pref exists precisely because pasting a chat excerpt with times
     /// is sometimes what you want and usually is not, so silently
-    /// ignoring it — as this did until now — loses a real behaviour.
+    /// ignoring it — as this did until now — loses a real behavior.
     pub fn selected_text(&self) -> String {
         let imp = self.imp_();
         let sel = *imp.selection.borrow();
@@ -3718,7 +3718,7 @@ impl RotulusView {
         self.queue_draw();
     }
 
-    /// Move `delta` notches along [`ZOOM_STEPS`].
+    /// Move `delta` notches along `ZOOM_STEPS`.
     ///
     /// Stepping through a fixed ladder rather than multiplying keeps the
     /// levels round and reproducible — repeated in/out returns to
@@ -4365,9 +4365,9 @@ fn install_menu_css() {
 ///
 /// The label needs **both** `xalign(0)` and `hexpand`. `xalign` places
 /// the text within the label's own allocation; without `hexpand` the
-/// label is only as wide as its text and gets centred in the button, so
+/// label is only as wide as its text and gets centered in the button, so
 /// the alignment has nothing to bite on and the row still reads as a
-/// centred caption.
+/// centered caption.
 ///
 /// Focusable, so a menu opened from the keyboard can be used from it.
 /// Opened by a click, the first row takes focus without showing a ring,

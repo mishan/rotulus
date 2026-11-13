@@ -9,7 +9,7 @@
 //! than dangling.
 //!
 //! **Widgets.** Every entry point takes a `RotulusView *` the caller owns
-//! and wraps it with a plain reference ([`view_of`]); none of them may
+//! and wraps it with a plain reference (`view_of`); none of them may
 //! sink a floating reference, which is the easiest way to destroy a
 //! widget the caller still thinks it has.
 

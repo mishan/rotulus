@@ -148,7 +148,7 @@ no spike at all (22.6 ms worst, 166.8 ms total — i.e. idle). Two of three
 showed ~105 ms. The effect is real but not deterministic, most likely
 depending on where the invalidation lands relative to xtext's `io_tag`
 render timeout (`gtk_xtext_adjustment_timeout`). Three samples is enough
-to establish the effect exists and not enough to characterise its
+to establish the effect exists and not enough to characterize its
 distribution.
 
 ### Scroll — p95 42.1 ms → 17.3 ms
@@ -207,7 +207,7 @@ a boolean, and what the harness docs, the `chat_bench.c` header and the
 `chat_find.rs` module comment all said. `=1` matched nothing and fell
 through to xtext.
 
-So the first complete run was six reports, three of them labelled as the
+So the first complete run was six reports, three of them labeled as the
 new backend, all six measuring xtext. Every number was plausible. The
 comparison showed ingest parity and no reflow difference, which would
 have been read as "the new backend isn't buying anything".
@@ -217,7 +217,7 @@ and Misha read that line. Nothing else in the output would have revealed
 it.
 
 Fixed by: accepting `1/true/yes/on` alongside `new/hxchat`; **warning**
-on an unrecognised value instead of silently falling back; logging the
+on an unrecognized value instead of silently falling back; logging the
 chosen backend on every startup rather than only when hxchat wins; and
 making `chatbench.sh` exit non-zero unless it has seen a report from both
 backends. The harness now catches its own misconfiguration.
@@ -272,9 +272,9 @@ large win, and in two of them hxchat is vsync-bound, meaning the widget
 is no longer the limiting factor.
 
 **Does not justify:** any claim about memory (§5), any claim about
-behaviour at scrollback sizes far above 20k, or any cross-machine
+behavior at scrollback sizes far above 20k, or any cross-machine
 comparison. The 105 ms xtext relayout spike is established as real but
-not characterised — it appeared in two runs of three.
+not characterized — it appeared in two runs of three.
 
 **Cannot be repeated.** With xtext deleted there is one backend. The reflow harness
 survives as a single-backend regression baseline, which is a different

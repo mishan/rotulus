@@ -3,7 +3,7 @@
 //! Implements the restricted subset in docs/design.md "Markdown" —
 //! `**bold**`, `*italic*` / `_italic_`, `` `code` ``, `~~strike~~`,
 //! `[label](url)`, and backslash escapes. Block constructs (fenced code,
-//! `>` quotes) are recognised by [`split_blocks`] before this scanner
+//! `>` quotes) are recognized by [`split_blocks`] before this scanner
 //! runs; everything else CommonMark defines is deliberately absent.
 //!
 //! **Why hand-written rather than `pulldown-cmark`.** Three reasons: it
