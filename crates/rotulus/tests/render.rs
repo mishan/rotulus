@@ -60,6 +60,9 @@ fn pin_environment() {
     )
     .unwrap();
     std::env::set_var("FONTCONFIG_FILE", &conf);
+    // No settings.ini: one saying gtk-font-rendering=manual draws other
+    // glyphs than the goldens' GTK default.
+    std::env::set_var("XDG_CONFIG_HOME", &tmp);
     std::env::set_var("GSK_RENDERER", "cairo");
     std::env::set_var("TZ", "UTC");
     std::env::set_var("GTK_THEME", "Adwaita");
