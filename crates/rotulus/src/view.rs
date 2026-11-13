@@ -432,9 +432,9 @@ pub(crate) mod imp {
         pub(crate) drawn_media: RefCell<std::collections::HashSet<u32>>,
         /// Last pointer position seen during a drag, widget-relative.
         ///
-        /// CLAUDE.md records the xtext version of this as a known
-        /// degradation: its scroll timers read `xtext->select_end_y`
-        /// rather than the live device position, because GTK 4 has no
+        /// GtkHx's xtext degraded here: its scroll timers read
+        /// `xtext->select_end_y` rather than the live device position,
+        /// because GTK 4 has no
         /// synchronous "where is the pointer" accessor. Storing it from
         /// the drag handler and consuming it from a per-frame tick is
         /// the actual answer — the staleness window becomes one frame
@@ -467,6 +467,8 @@ pub(crate) mod imp {
         pub marker: Cell<Option<MessageId>>,
         /// The row drawn on the spotlight's background, if any.
         pub spotlight: Cell<Option<MessageId>>,
+        /// The visible rows `visible-rows-changed` last told of.
+        pub visible_told: Cell<Option<(MessageId, MessageId)>>,
         /// The accessible text, built when an assistive technology first
         /// asks for it and kept in step with appends from then on.
         #[cfg(feature = "v4_14")]
@@ -523,6 +525,7 @@ pub(crate) mod imp {
                 font: RefCell::new(DEFAULT_FONT.to_string()),
                 marker: Cell::new(None),
                 spotlight: Cell::new(None),
+                visible_told: Cell::new(None),
                 #[cfg(feature = "v4_14")]
                 a11y: RefCell::new(None),
                 #[cfg(feature = "v4_14")]
@@ -614,6 +617,8 @@ pub(crate) mod imp {
                         .build(),
                     // The selection was made, extended or cleared.
                     glib::subclass::Signal::builder("selection-changed").build(),
+                    // The first or last row in view is another, as drawn.
+                    glib::subclass::Signal::builder("visible-rows-changed").build(),
                     // (mark, keyboard) — a primary click on a row's reply
                     // header, or Enter or Space on a focused one, which `keyboard`
                     // tells apart. The application knows what the row
@@ -936,6 +941,7 @@ pub(crate) mod imp {
             let obj = self.obj();
             let before = std::mem::take(&mut *self.drawn_media.borrow_mut());
             obj.snapshot_content(snapshot);
+            obj.note_visible_rows();
             // Chrome, drawn over the content and outside its clip.
             obj.snapshot_focus(snapshot);
             obj.snapshot_zoom_badge(snapshot, obj.width(), obj.height());
@@ -1742,6 +1748,71 @@ impl RotulusView {
     pub fn spotlight(&self) -> Option<MessageId> {
         let id = self.imp_().spotlight.get()?;
         self.imp_().buffer.borrow().row_of(id).map(|_| id)
+    }
+
+    /// The first and last rows at least partly in the viewport, in order,
+    /// or `None` when there are none. Dividers and load-more rows count,
+    /// as rows like any other. It answers whether or not the view is
+    /// mapped, so a view in a background tab still has rows in view;
+    /// `visible-rows-changed` says when it changes. A view not yet given
+    /// a size has no viewport, so no rows in it.
+    pub fn visible_rows(&self) -> Option<(MessageId, MessageId)> {
+        let (first, last) = self.rows_in_viewport()?;
+        let buf = self.imp_().buffer.borrow();
+        Some((buf.id_at(first)?, buf.id_at(last)?))
+    }
+
+    /// Whether any of the row `id` is in the viewport, as `visible_rows`
+    /// counts it. Ids do not sort in the order rows are shown, since
+    /// history is inserted above with newer ids, so this is how to ask
+    /// about one row.
+    pub fn is_row_visible(&self, id: MessageId) -> bool {
+        let Some(row) = self.imp_().buffer.borrow().row_of(id) else {
+            return false;
+        };
+        self.rows_in_viewport()
+            .is_some_and(|(first, last)| (first..=last).contains(&row))
+    }
+
+    /// `rows_on_screen`, but none without a viewport: unallocated, the
+    /// content height is clamped to a pixel, which would count a row.
+    fn rows_in_viewport(&self) -> Option<(usize, usize)> {
+        (self.height() > 2 * PAD_Y)
+            .then(|| self.rows_on_screen())
+            .flatten()
+    }
+
+    /// The row keyboard focus is on, whatever on it has focus: the row as
+    /// a whole, its speaker, reply header, a link, an image, a reaction
+    /// chip, or a load-more row. `None` when the view is not its window's
+    /// focus, or focus is on the view as a whole. Read when wanted, as
+    /// from the application's own key handler, rather than announced.
+    pub fn focus_row(&self) -> Option<MessageId> {
+        if !self.is_focus() {
+            return None;
+        }
+        let id = self.imp_().focus_item.borrow().as_ref()?.message();
+        self.imp_().buffer.borrow().row_of(id).map(|_| id)
+    }
+
+    /// After a frame, tell of the visible rows if they changed. From an
+    /// idle, not the frame: a handler that scrolls, appends or redraws
+    /// would otherwise do it mid-paint. The idle compares again, so frames
+    /// drawn before it runs are told of once.
+    fn note_visible_rows(&self) {
+        if self.visible_rows() == self.imp_().visible_told.get() {
+            return;
+        }
+        let this = self.downgrade();
+        glib::idle_add_local_once(move || {
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            let now = this.visible_rows();
+            if now != this.imp_().visible_told.replace(now) {
+                this.emit_by_name::<()>("visible-rows-changed", &[]);
+            }
+        });
     }
 
     /// Scroll the row `id` into view, near the middle unless it is in
@@ -4414,7 +4485,7 @@ impl RotulusView {
         if !entering && item.is_none() && !forward {
             return false;
         }
-        let next = self.visible_rows().and_then(|rows| {
+        let next = self.rows_on_screen().and_then(|rows| {
             self.imp_()
                 .buffer
                 .borrow()
@@ -4432,7 +4503,7 @@ impl RotulusView {
     /// (`forward`), or above, for Up. Off the ends, it stays.
     pub(crate) fn step_row_focus(&self, forward: bool) -> bool {
         let item = self.imp_().focus_item.borrow().clone();
-        let next = self.visible_rows().and_then(|rows| {
+        let next = self.rows_on_screen().and_then(|rows| {
             self.imp_()
                 .buffer
                 .borrow()
@@ -4460,7 +4531,7 @@ impl RotulusView {
     }
 
     /// The first and last rows on screen.
-    pub(crate) fn visible_rows(&self) -> Option<(usize, usize)> {
+    pub(crate) fn rows_on_screen(&self) -> Option<(usize, usize)> {
         let height = content_height(self.height());
         let mut buf = self.imp_().buffer.borrow_mut();
         let top = buf.scroll_offset(height);

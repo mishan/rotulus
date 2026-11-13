@@ -829,6 +829,8 @@ fn gtk_class_and_construction_smoke() {
     check_replace_and_marker();
     check_reveal();
     check_spotlight();
+    check_visible_rows();
+    check_focus_row();
     check_text_color();
     check_text_scale_remeasures();
     check_keyboard_focus();
@@ -2118,14 +2120,14 @@ fn check_reveal() {
     #[cfg(feature = "v4_14")]
     let caret_on = || imp.a11y_caret.get().map(|s| s.focus.message);
     assert!(
-        view.visible_rows().unwrap().0 > 100,
+        view.rows_on_screen().unwrap().0 > 100,
         "it starts at the bottom"
     );
 
     let mut focus_on = None;
     for (row, focus) in [(100, true), (0, false)] {
         assert!(view.reveal(ids[row], focus));
-        let (first, last) = view.visible_rows().unwrap();
+        let (first, last) = view.rows_on_screen().unwrap();
         assert!((first..=last).contains(&row), "row {row} is on screen");
         assert!(!imp.buffer.borrow().is_following(), "it left the bottom");
         if focus {
@@ -2143,11 +2145,11 @@ fn check_reveal() {
     assert!(view.remove(ids[150]));
     view.set_max_rows(150);
     assert!(view.reveal(ids[100], false));
-    let shown = view.visible_rows();
+    let shown = view.rows_on_screen();
     for (gone, focus) in [(150, false), (150, true), (0, false), (0, true)] {
         assert!(!view.reveal(ids[gone], focus), "row {gone} is gone");
     }
-    assert_eq!(view.visible_rows(), shown, "and is no scroll");
+    assert_eq!(view.rows_on_screen(), shown, "and is no scroll");
     assert_eq!(
         focused(),
         focus_on.map(|message| FocusItem::Row { message })
@@ -2218,6 +2220,227 @@ fn check_spotlight() {
     view.set_spotlight(Some(ids[1]));
     assert!(view.remove(ids[1]));
     assert_eq!(view.spotlight(), None, "it goes with its row");
+}
+
+/// The visible rows are those with any pixel in the viewport, and
+/// `visible-rows-changed` follows a frame that changed them, once.
+fn check_visible_rows() {
+    use gtk4::subclass::prelude::WidgetImpl;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let view = crate::view::RotulusView::new();
+    let ids: Vec<_> = (0..200)
+        .map(|i| view.append(message_row(1, "al", &format!("line {i}"))))
+        .collect();
+    assert_eq!(view.visible_rows(), None, "no viewport before a size");
+    assert!(!view.is_row_visible(ids[199]));
+    let holder = laid_out(&view);
+    let told = Rc::new(Cell::new(0));
+    {
+        let told = told.clone();
+        view.connect_closure(
+            "visible-rows-changed",
+            false,
+            gtk4::glib::closure_local!(move |_: crate::view::RotulusView| {
+                told.set(told.get() + 1);
+            }),
+        );
+    }
+    let frame = || {
+        view.imp_ref().snapshot(&gtk4::Snapshot::new());
+        let ctx = gtk4::glib::MainContext::default();
+        while ctx.iteration(false) {}
+    };
+    let height = || (view.height() - 2 * crate::view::PAD_Y) as u32;
+    // A row's top and bottom edges in the scrollback, by its place.
+    let edges = |row: usize| {
+        let mut buf = view.imp_ref().buffer.borrow_mut();
+        let top = buf.index_mut().offset_of(row);
+        (top, top + u64::from(buf.index_mut().height_at(row)))
+    };
+    let row_of = |id| view.imp_ref().buffer.borrow().row_of(id).unwrap();
+    let adj = view.vadjustment().unwrap();
+    let scroll = |y: u64| adj.set_value(y as f64);
+    let scroll_to = |id| scroll(edges(row_of(id)).0);
+    let raw = view.upcast_ref::<gtk4::Widget>().as_ptr() as *mut _;
+    let mark = crate::ffi::mark_to_ptr;
+    frame();
+    told.set(0);
+
+    // (case, what is done, the first row in view if it is known, how
+    // often it is told)
+    type Act<'a> = Box<dyn Fn() + 'a>;
+    let cases: [(&str, Act, Option<usize>, u32); 9] = [
+        ("a frame that moves nothing", Box::new(|| {}), None, 0),
+        (
+            "a row with its last pixel at the top",
+            Box::new(|| scroll(edges(50).0 - 1)),
+            Some(49),
+            1,
+        ),
+        (
+            "that row scrolled out",
+            Box::new(|| scroll_to(ids[50])),
+            Some(50),
+            1,
+        ),
+        (
+            "a row appended out of sight",
+            Box::new(|| {
+                view.append(message_row(1, "al", "new"));
+            }),
+            Some(50),
+            0,
+        ),
+        (
+            "rows trimmed above",
+            Box::new(|| view.set_max_rows(180)),
+            Some(50),
+            0,
+        ),
+        (
+            "a resize",
+            Box::new(|| holder.allocate(400, 200, -1, None)),
+            Some(50),
+            1,
+        ),
+        (
+            "a reveal",
+            Box::new(|| assert!(view.reveal(ids[150], false))),
+            None,
+            1,
+        ),
+        (
+            "two frames before the idle",
+            Box::new(|| {
+                scroll_to(ids[90]);
+                view.imp_ref().snapshot(&gtk4::Snapshot::new());
+                scroll_to(ids[80]);
+            }),
+            Some(80),
+            1,
+        ),
+        (
+            "a row starting at the bottom edge",
+            Box::new(|| scroll(edges(90).0 - u64::from(height()))),
+            None,
+            1,
+        ),
+    ];
+    for (case, act, first, times) in cases {
+        act();
+        frame();
+        assert_eq!(told.replace(0), times, "{case}: told");
+        let (f, l) = view.visible_rows().expect("rows are in view");
+        if let Some(first) = first {
+            assert_eq!(f, ids[first], "{case}: the first row");
+        }
+        let top = view.imp_ref().buffer.borrow_mut().scroll_offset(height());
+        let bottom = top + u64::from(height());
+        let (fr, lr) = (row_of(f), row_of(l));
+        assert!(
+            edges(fr).1 > top && edges(fr).0 <= top,
+            "{case}: the first has a pixel in view"
+        );
+        assert!(
+            edges(lr).0 < bottom && edges(lr).1 >= bottom,
+            "{case}: so has the last"
+        );
+        assert!(view.is_row_visible(f) && view.is_row_visible(l), "{case}");
+        let past: Vec<_> = [fr.wrapping_sub(1), lr + 1]
+            .into_iter()
+            .filter_map(|r| view.imp_ref().buffer.borrow().id_at(r))
+            .collect();
+        assert!(
+            !past.iter().any(|&id| view.is_row_visible(id)),
+            "{case}: and the rows past them none"
+        );
+        let (mut cf, mut cl) = (std::ptr::null_mut(), std::ptr::null_mut());
+        unsafe {
+            assert_eq!(
+                crate::ffi::rotulus_view_get_visible_rows(raw, &mut cf, &mut cl),
+                1
+            );
+            assert_eq!((cf, cl), (mark(f), mark(l)), "{case}: and so C is told");
+            assert_eq!(crate::ffi::rotulus_view_is_row_visible(raw, mark(l)), 1);
+            assert_eq!(
+                crate::ffi::rotulus_view_is_row_visible(raw, mark(past[0])),
+                0
+            );
+        }
+    }
+    assert!(!view.is_row_visible(ids[0]), "nor is a trimmed row");
+    view.clear();
+    frame();
+    assert_eq!(
+        (view.visible_rows(), told.get()),
+        (None, 1),
+        "nor rows once cleared"
+    );
+}
+
+/// `focus_row` is the row whatever on it the keyboard is on, and nothing
+/// while the view has no focus; the view leaves letters to the
+/// application.
+fn check_focus_row() {
+    use gtk4::glib::translate::IntoGlib;
+    use rotulus_layout::{LoadMoreDirection, Message, MessageKind};
+
+    let view = crate::view::RotulusView::new();
+    view.set_indent(true);
+    let more = view.append(Message {
+        kind: MessageKind::LoadMore(LoadMoreDirection::Older),
+        ..Message::system(rotulus_layout::ParsedText::plain("load older"))
+    });
+    let al = view.append(message_row(7, "al", "see https://example.com"));
+    let quote = rotulus_layout::Reply::Unavailable("gone".into());
+    assert!(view.set_reply(al, Some(quote)));
+    let bo = view.append(message_row(8, "bo", "plain"));
+    let holder = laid_out(&view);
+    let window = gtk4::Window::new();
+    window.set_child(Some(&holder));
+    holder.allocate(400, 300, -1, None);
+    let raw = view.upcast_ref::<gtk4::Widget>().as_ptr() as *mut _;
+    let from_c = || crate::ffi::ptr_to_mark(unsafe { crate::ffi::rotulus_view_get_focus_row(raw) });
+
+    assert_eq!(view.focus_row(), None, "without focus");
+    assert!(view.child_focus(gtk4::DirectionType::TabForward));
+    assert_eq!(view.focus_row(), None, "on the view as a whole");
+    let mut rows = Vec::new();
+    while view.child_focus(gtk4::DirectionType::TabForward) {
+        let item = view.imp_ref().focus_item.borrow().clone().unwrap();
+        assert_eq!(view.focus_row(), Some(item.message()), "{item:?}");
+        assert_eq!(from_c(), view.focus_row(), "{item:?}, from C");
+        rows.push(item.message());
+    }
+    assert_eq!(
+        rows,
+        [more, al, al, al, bo],
+        "the load-more row, al's speaker, header and link, and bo's speaker"
+    );
+    assert!(view.step_row_focus(false));
+    assert_eq!(view.focus_row(), Some(bo), "a row as a whole");
+
+    let keys = view
+        .observe_controllers()
+        .into_iter()
+        .filter_map(|c| c.ok()?.downcast::<gtk4::EventControllerKey>().ok())
+        .collect::<Vec<_>>();
+    for (key, state) in [
+        (gtk4::gdk::Key::r, gtk4::gdk::ModifierType::empty()),
+        (gtk4::gdk::Key::R, gtk4::gdk::ModifierType::SHIFT_MASK),
+    ] {
+        for c in &keys {
+            let handled: bool = c.emit_by_name("key-pressed", &[&key.into_glib(), &0u32, &state]);
+            assert!(!handled, "{key:?} on a focused row is the application's");
+        }
+    }
+
+    gtk4::prelude::GtkWindowExt::set_focus(&window, None::<&gtk4::Widget>);
+    assert_eq!(view.focus_row(), None, "focus gone from the view");
+    assert_eq!(from_c(), None);
+    window.destroy();
 }
 
 /// Every text node under `node`, by its color.

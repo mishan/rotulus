@@ -134,6 +134,19 @@ GType rotulus_load_direction_get_type (void);
  */
 
 /**
+ * RotulusView::visible-rows-changed:
+ * @self: the view
+ *
+ * The first or last row in view is another than when it last fired,
+ * after a scroll, a resize, rows added or trimmed, or a reveal. It fires
+ * once after the frame that drew the change, never in it, and not for a
+ * frame that changed nothing, so not while the view is unmapped either;
+ * the first frame after it is mapped again catches up. Read
+ * [method@Rotulus.View.get_visible_rows] or
+ * [method@Rotulus.View.is_row_visible] from it.
+ */
+
+/**
  * RotulusView::reply-activated:
  * @self: the view
  * @mark: the row whose reply header was activated
@@ -1013,6 +1026,58 @@ void rotulus_view_set_spotlight (RotulusView *self, RotulusMark *mark);
  */
 gboolean rotulus_view_reveal (RotulusView *self, RotulusMark *mark,
                               gboolean focus);
+
+/**
+ * rotulus_view_get_visible_rows:
+ * @self: a view
+ * @first: (out) (optional) (transfer none) (nullable): the first row at
+ *   least partly in view
+ * @last: (out) (optional) (transfer none) (nullable): the last row at
+ *   least partly in view
+ *
+ * Gets the rows in the viewport, any pixel of them, in the order shown.
+ * Dividers and load-more rows count as rows like any other. It answers
+ * whether or not the view is mapped, so a view in a background tab still
+ * has rows in view; a view not yet given a size has none. A mark does not tell where its row is
+ * shown, since history inserted above has newer marks, so ask about one
+ * row with [method@Rotulus.View.is_row_visible].
+ *
+ * Returns: %FALSE, and %NULL in both, when no row is in view
+ */
+gboolean rotulus_view_get_visible_rows (RotulusView *self,
+                                        RotulusMark **first,
+                                        RotulusMark **last);
+
+/**
+ * rotulus_view_is_row_visible:
+ * @self: a view
+ * @mark: a row
+ *
+ * Returns: whether any of the row is in the viewport, as
+ *   [method@Rotulus.View.get_visible_rows] counts it; %FALSE for a row
+ *   that is gone
+ */
+gboolean rotulus_view_is_row_visible (RotulusView *self, RotulusMark *mark);
+
+/**
+ * rotulus_view_get_focus_row:
+ * @self: a view
+ *
+ * Gets the row keyboard focus is on, whatever on it has focus: the row
+ * as a whole, its speaker, reply header, a link, an image, a reaction
+ * chip, or a load-more row. It is read when wanted, as from a key
+ * handler of the application's own, rather than announced. A key
+ * controller the application adds to the view runs before the view's
+ * own, in either phase, since GTK runs a widget's newest controller
+ * first; one on an ancestor, in the bubble phase, sees only what the
+ * view leaves, and the view leaves plain letters. Ctrl+C on a selection
+ * and the paging keys are the exception: the view takes them on its
+ * window, in the capture phase, before any of these.
+ *
+ * Returns: (transfer none) (nullable): the row, or %NULL when the view
+ *   is not its window's focus or focus is on the view as a whole
+ */
+RotulusMark *rotulus_view_get_focus_row (RotulusView *self);
 
 /* ---- replies ------------------------------------------------------ *
  *

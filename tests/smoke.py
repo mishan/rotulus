@@ -67,4 +67,13 @@ palette = [Gdk.RGBA() for _ in range(Rotulus.PAL_COLS)]
 view.set_palette(palette)
 assert view.get_text_color(Rotulus.PAL_NICK_COLOR0).alpha > 0
 
+# Never given a size, it has no viewport.
+assert view.get_visible_rows() == (False, None, None)
+assert not view.is_row_visible(first)
+assert view.get_focus_row() is None
+told = []
+view.connect("visible-rows-changed", lambda v: told.append(v.get_visible_rows()[0]))
+view.emit("visible-rows-changed")
+assert told == [False], told
+
 print("ok")

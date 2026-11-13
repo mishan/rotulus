@@ -838,6 +838,45 @@ pub unsafe extern "C" fn rotulus_view_reveal(
     }
 }
 
+/// # Safety
+/// `w` is a valid `RotulusView *`; `first` and `last` are each NULL or
+/// point to a `RotulusMark *`.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_get_visible_rows(
+    w: CGtkWidget,
+    first: *mut *mut c_void,
+    last: *mut *mut c_void,
+) -> c_int {
+    let rows = with_view!(w, v, v.visible_rows());
+    for (out, id) in [(first, rows.map(|r| r.0)), (last, rows.map(|r| r.1))] {
+        if !out.is_null() {
+            *out = id.map_or(std::ptr::null_mut(), mark_to_ptr);
+        }
+    }
+    c_int::from(rows.is_some())
+}
+
+/// # Safety
+/// `w` is a valid `RotulusView *`; `mark` is a mark or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_is_row_visible(w: CGtkWidget, mark: *mut c_void) -> c_int {
+    match (view_of(w), ptr_to_mark(mark)) {
+        (Some(v), Some(id)) => c_int::from(v.is_row_visible(id)),
+        _ => 0,
+    }
+}
+
+/// # Safety
+/// `w` is a valid `RotulusView *`.
+#[no_mangle]
+pub unsafe extern "C" fn rotulus_view_get_focus_row(w: CGtkWidget) -> *mut c_void {
+    with_view!(
+        w,
+        v,
+        v.focus_row().map_or(std::ptr::null_mut(), mark_to_ptr)
+    )
+}
+
 // ---- replies --------------------------------------------------------
 
 /// # Safety

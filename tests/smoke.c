@@ -91,6 +91,13 @@ main (void)
     rotulus_view_set_spotlight (view, first);
     rotulus_view_set_spotlight (view, NULL);
 
+    /* Never given a size, it has no viewport. */
+    RotulusMark *top = second, *bottom = second;
+    g_assert_false (rotulus_view_get_visible_rows (view, &top, &bottom));
+    g_assert_true (top == NULL && bottom == NULL);
+    g_assert_false (rotulus_view_is_row_visible (view, second));
+    g_assert_null (rotulus_view_get_focus_row (view));
+
     g_assert_true (rotulus_view_remove (view, first));
     g_assert_false (rotulus_view_remove (view, first));
     g_assert_false (rotulus_view_reveal (view, first, TRUE));
